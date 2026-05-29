@@ -1,0 +1,242 @@
+{{define "content"}}
+<section class="card hero">
+  <div class="label">Training room</div>
+  <h1>{{.Training.Title}}</h1>
+  <div class="meta">
+    <span class="chip">{{.Training.Time}}</span>
+    <span>Trainer: {{.Training.Trainer}}</span>
+  </div>
+  <p class="muted">{{.Training.Description}}</p>
+</section>
+
+<div class="split">
+  <section class="card stack">
+    <div class="label">Chat</div>
+    <div id="chat-log" class="stack" style="max-height: 360px; overflow:auto;"></div>
+    <form id="chat-form">
+      <label>
+        Message
+        <input id="chat-input" name="message" autocomplete="off" placeholder="Say something to the room" />
+      </label>
+      <button class="button" type="submit">Send</button>
+    </form>
+  </section>
+
+  <section class="card stack">
+    <div class="label">Video</div>
+    <p class="muted small">This room uses a peer-to-peer WebRTC connection with websocket signaling. It currently supports two participants per room.</p>
+    <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
+    <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
+    <div class="meta">
+      <span id="video-state" class="chip">Connecting</span>
+    </div>
+  </section>
+</div>
+
+<script>
+(() => {
+  const roomID = {{printf "%q" .Training.ID}};
+  const currentUser = {{printf "%q" .CurrentUser.Email}};
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+  const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
+  const chatLog = document.getElementById("chat-log");
+  const chatForm = document.getElementById("chat-form");
+  const chatInput = document.getElementById("chat-input");
+  const localVideo = document.getElementById("local-video");
+  const remoteVideo = document.getElementById("remote-video");
+  const stateBadge = document.getElementById("video-state");
+
+  const clientId = crypto.randomUUID();
+  let myClientId = null;
+  let isInitiator = false;
+  let offerSent = false;
+  let participants = [];
+  let localStream = null;
+  let peerConnection = null;
+
+  const pcConfig = {
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+  };
+
+  function appendMessage(label, text, tone) {
+    const wrap = document.createElement("div");
+    wrap.className = "card";
+    wrap.style.marginBottom = "0";
+    wrap.style.borderColor = tone === "system" ? "rgba(15,118,110,0.25)" : "rgba(31,41,55,0.08)";
+    const title = document.createElement("strong");
+    title.textContent = label;
+    const body = document.createElement("div");
+    body.className = "muted";
+    body.textContent = text;
+    wrap.appendChild(title);
+    wrap.appendChild(body);
+    chatLog.appendChild(wrap);
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
+
+  function setState(value) {
+    stateBadge.textContent = value;
+  }
+
+  function ensurePeerConnection() {
+    if (peerConnection) return peerConnection;
+
+    peerConnection = new RTCPeerConnection(pcConfig);
+    peerConnection.onicecandidate = (event) => {
+      if (event.candidate) {
+        socket.send(JSON.stringify({
+          type: "signal",
+          signalType: "ice",
+          data: event.candidate,
+        }));
+      }
+    };
+    peerConnection.ontrack = (event) => {
+      remoteVideo.srcObject = event.streams[0];
+      setState("Connected");
+    };
+    if (localStream) {
+      localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+    }
+
+    return peerConnection;
+  }
+
+  async function startLocalMedia() {
+    try {
+      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localVideo.srcObject = localStream;
+      if (peerConnection) {
+        localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+      }
+    } catch (err) {
+      appendMessage("System", "Camera or microphone access was blocked.", "system");
+      setState("Media blocked");
+    }
+  }
+
+  async function makeOffer() {
+    if (offerSent) return;
+    offerSent = true;
+    const pc = ensurePeerConnection();
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    socket.send(JSON.stringify({
+      type: "signal",
+      signalType: "offer",
+      data: offer,
+    }));
+  }
+
+  socket.addEventListener("open", async () => {
+    appendMessage("System", `Connected as ${currentUser}`, "system");
+    await startLocalMedia();
+    socket.send(JSON.stringify({ type: "join", clientId }));
+  });
+
+  socket.addEventListener("message", async (event) => {
+    const msg = JSON.parse(event.data);
+
+    if (msg.type === "welcome") {
+      myClientId = msg.clientId;
+      participants = msg.participants || [];
+      (msg.history || []).forEach((pastMsg) => {
+        if (pastMsg.senderId && pastMsg.senderId === myClientId) {
+          return;
+        }
+        appendMessage(pastMsg.senderEmail || "Guest", pastMsg.text || "", "chat");
+      });
+      isInitiator = participants.length === 2 && participants[0].id === myClientId;
+      if (participants.length > 1) {
+        if (isInitiator) {
+          ensurePeerConnection();
+          await makeOffer();
+          setState("Calling");
+        } else {
+          setState("Waiting for offer");
+        }
+      } else {
+        setState("Waiting for partner");
+      }
+      return;
+    }
+
+    if (msg.type === "room-full") {
+      appendMessage("System", "This room already has two participants.", "system");
+      setState("Room full");
+      socket.close();
+      return;
+    }
+
+    if (msg.type === "participants") {
+      participants = msg.participants || [];
+      if (participants.length === 2 && myClientId) {
+        isInitiator = participants[0].id === myClientId;
+        if (isInitiator) {
+          ensurePeerConnection();
+          await makeOffer();
+          setState("Calling");
+        } else {
+          setState("Waiting for offer");
+        }
+      } else if (participants.length === 1) {
+        setState("Waiting for partner");
+      }
+      return;
+    }
+
+    if (msg.type === "chat") {
+      if (msg.senderId && msg.senderId === myClientId) {
+        return;
+      }
+      appendMessage(msg.senderEmail || "Guest", msg.text, "chat");
+      return;
+    }
+
+    if (msg.type === "signal") {
+      const pc = ensurePeerConnection();
+
+      if (msg.signalType === "offer") {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        socket.send(JSON.stringify({
+          type: "signal",
+          signalType: "answer",
+          data: answer,
+        }));
+      } else if (msg.signalType === "answer") {
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+      } else if (msg.signalType === "ice" && msg.data) {
+        try {
+          await pc.addIceCandidate(msg.data);
+        } catch (err) {
+          console.warn("ICE candidate error", err);
+        }
+      }
+    }
+  });
+
+  chatForm.addEventListener("submit", (event) => {
+    event.preventDefault();
+    const text = chatInput.value.trim();
+    if (!text) return;
+    appendMessage(currentUser, text, "chat");
+    socket.send(JSON.stringify({
+      type: "chat",
+      text,
+    }));
+    chatInput.value = "";
+  });
+
+  window.addEventListener("beforeunload", () => {
+    if (peerConnection) {
+      peerConnection.close();
+    }
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+  });
+})();
+</script>
+{{end}}

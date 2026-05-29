@@ -1,0 +1,9 @@
+CREATE TABLE IF NOT EXISTS trainings (
+	id TEXT PRIMARY KEY,
+	title TEXT NOT NULL,
+	trainer TEXT NOT NULL,
+	description TEXT NOT NULL,
+	time TEXT NOT NULL,
+	created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);

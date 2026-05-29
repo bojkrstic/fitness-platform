@@ -1,0 +1,33 @@
+{{define "content"}}
+<section class="card hero">
+  <div class="label">Fitness Platform</div>
+  <h1>Manage trainings, members, chat, and live sessions from one place.</h1>
+  <p class="muted">
+    Log in to join rooms, use the admin panel to create trainings, and chat or connect video inside each training room.
+  </p>
+  <div class="toolbar">
+    <a class="nav-link" href="/trainings">Browse trainings</a>
+    {{if .CurrentUser}}
+      {{if eq .CurrentUser.Role "admin"}}
+        <a class="nav-link" href="/admin">Open admin</a>
+      {{end}}
+    {{else}}
+      <a class="nav-link" href="/auth/login">Login</a>
+      <a class="nav-link" href="/auth/register">Create account</a>
+    {{end}}
+  </div>
+</section>
+<div class="grid">
+  {{range .Trainings}}
+  <section class="card">
+    <div class="meta">
+      <span class="chip">{{.Time}}</span>
+      <span>{{.Trainer}}</span>
+    </div>
+    <h2>{{.Title}}</h2>
+    <p class="muted">{{.Description}}</p>
+    <p><a href="/trainings/{{.ID}}">Open room</a></p>
+  </section>
+  {{end}}
+</div>
+{{end}}

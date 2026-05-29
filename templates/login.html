@@ -1,0 +1,20 @@
+{{define "content"}}
+<section class="card hero">
+  <div class="label">Access</div>
+  <h1>Login</h1>
+  <p class="muted">Use your account to join live rooms and access the admin panel.</p>
+  <form method="post" action="/auth/login">
+    <input type="hidden" name="next" value="{{.Next}}">
+    <label>
+      Email
+      <input name="email" type="email" value="{{.Email}}" autocomplete="email" required>
+    </label>
+    <label>
+      Password
+      <input name="password" type="password" autocomplete="current-password" required>
+    </label>
+    <button class="button" type="submit">Login</button>
+  </form>
+  <p class="small muted">No account yet? <a href="/auth/register{{if .Next}}?next={{.Next}}{{end}}">Register here</a>.</p>
+</section>
+{{end}}

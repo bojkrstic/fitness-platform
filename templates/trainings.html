@@ -1,0 +1,22 @@
+{{define "content"}}
+<section class="card">
+  <div class="label">Catalog</div>
+  <h1>Trainings</h1>
+  <p class="muted">Open a room for chat and video once you're logged in.</p>
+</section>
+<div class="grid">
+  {{range .Trainings}}
+  <section class="card">
+    <div class="meta">
+      <span class="chip">{{.Time}}</span>
+      <span>{{.Trainer}}</span>
+    </div>
+    <h2>{{.Title}}</h2>
+    <p class="muted">{{.Description}}</p>
+    <p><a href="/trainings/{{.ID}}">Open room</a></p>
+  </section>
+  {{else}}
+  <p class="muted">No trainings available.</p>
+  {{end}}
+</div>
+{{end}}

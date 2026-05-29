@@ -1,0 +1,49 @@
+{{define "content"}}
+<section class="card hero">
+  <div class="label">Admin</div>
+  <h1>Training management</h1>
+  <p class="muted">Create new trainings and keep the live schedule up to date.</p>
+</section>
+
+<div class="split">
+  <section class="card stack">
+    <div class="label">New training</div>
+    <form method="post" action="/admin/trainings">
+      <label>
+        Title
+        <input name="title" value="{{.Form.Title}}" required>
+      </label>
+      <label>
+        Trainer
+        <input name="trainer" value="{{.Form.Trainer}}" required>
+      </label>
+      <label>
+        Time
+        <input name="time" value="{{.Form.Time}}" placeholder="09:00" required>
+      </label>
+      <label>
+        Description
+        <textarea name="description" required>{{.Form.Description}}</textarea>
+      </label>
+      <button class="button" type="submit">Create training</button>
+    </form>
+  </section>
+
+  <section class="card stack">
+    <div class="label">Existing trainings</div>
+    {{range .Trainings}}
+      <article class="card" style="margin-bottom:0;">
+        <div class="meta">
+          <span class="chip">{{.Time}}</span>
+          <span>{{.Trainer}}</span>
+        </div>
+        <h2>{{.Title}}</h2>
+        <p class="muted">{{.Description}}</p>
+        <p><a href="/trainings/{{.ID}}">Open room</a></p>
+      </article>
+    {{else}}
+      <p class="muted">No trainings yet.</p>
+    {{end}}
+  </section>
+</div>
+{{end}}
