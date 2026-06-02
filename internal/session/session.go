@@ -1,4 +1,4 @@
-package main
+package session
 
 import (
 	"crypto/rand"
@@ -7,30 +7,30 @@ import (
 	"sync"
 )
 
-const sessionCookieName = "fitness_session"
-
-type sessionData struct {
+type Data struct {
 	UserID string
 }
 
-type SessionManager struct {
+type Manager struct {
 	mu         sync.RWMutex
-	sessions   map[string]sessionData
+	sessions   map[string]Data
 	cookieName string
 }
 
-func NewSessionManager() *SessionManager {
-	return &SessionManager{
-		sessions:   make(map[string]sessionData),
-		cookieName: sessionCookieName,
+const CookieName = "fitness_session"
+
+func NewManager() *Manager {
+	return &Manager{
+		sessions:   make(map[string]Data),
+		cookieName: CookieName,
 	}
 }
 
-func (s *SessionManager) Create(w http.ResponseWriter, userID string) {
+func (s *Manager) Create(w http.ResponseWriter, userID string) {
 	token := randomToken()
 
 	s.mu.Lock()
-	s.sessions[token] = sessionData{UserID: userID}
+	s.sessions[token] = Data{UserID: userID}
 	s.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{
@@ -42,10 +42,10 @@ func (s *SessionManager) Create(w http.ResponseWriter, userID string) {
 	})
 }
 
-func (s *SessionManager) Current(r *http.Request) (sessionData, bool) {
+func (s *Manager) Current(r *http.Request) (Data, bool) {
 	cookie, err := r.Cookie(s.cookieName)
 	if err != nil {
-		return sessionData{}, false
+		return Data{}, false
 	}
 
 	s.mu.RLock()
@@ -55,7 +55,7 @@ func (s *SessionManager) Current(r *http.Request) (sessionData, bool) {
 	return data, ok
 }
 
-func (s *SessionManager) Destroy(w http.ResponseWriter, r *http.Request) {
+func (s *Manager) Destroy(w http.ResponseWriter, r *http.Request) {
 	cookie, err := r.Cookie(s.cookieName)
 	if err == nil {
 		s.mu.Lock()

@@ -1,6 +1,8 @@
-package main
+package room
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -10,61 +12,97 @@ import (
 	"sync"
 	"time"
 
-	"github.com/go-chi/chi/v5"
+	"fitnes-platform/internal/model"
+
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
-}
-
 var ErrRoomFull = errors.New("room full")
 
-type RoomHub struct {
+var Upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
+
+type Hub struct {
 	mu    sync.Mutex
 	rooms map[string]*Room
 }
 
 type Room struct {
 	clients  map[*Client]struct{}
-	messages []socketMessage
+	messages []Message
 }
 
 type Client struct {
 	id     string
 	roomID string
-	user   *User
+	user   *model.User
 	conn   *websocket.Conn
 	send   chan []byte
-	hub    *RoomHub
+	hub    *Hub
 	once   sync.Once
 }
 
-type roomParticipant struct {
+type Participant struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
 }
 
-type socketMessage struct {
-	Type         string            `json:"type"`
-	Text         string            `json:"text,omitempty"`
-	SignalType   string            `json:"signalType,omitempty"`
-	Data         json.RawMessage   `json:"data,omitempty"`
-	SenderID     string            `json:"senderId,omitempty"`
-	SenderEmail  string            `json:"senderEmail,omitempty"`
-	Participants []roomParticipant `json:"participants,omitempty"`
-	History      []socketMessage   `json:"history,omitempty"`
-	ClientID     string            `json:"clientId,omitempty"`
-	Timestamp    string            `json:"timestamp,omitempty"`
+type Message struct {
+	Type         string          `json:"type"`
+	Text         string          `json:"text,omitempty"`
+	SignalType   string          `json:"signalType,omitempty"`
+	Data         json.RawMessage `json:"data,omitempty"`
+	SenderID     string          `json:"senderId,omitempty"`
+	SenderEmail  string          `json:"senderEmail,omitempty"`
+	Participants []Participant   `json:"participants,omitempty"`
+	History      []Message       `json:"history,omitempty"`
+	ClientID     string          `json:"clientId,omitempty"`
+	Timestamp    string          `json:"timestamp,omitempty"`
 }
 
-func NewRoomHub() *RoomHub {
-	return &RoomHub{rooms: make(map[string]*Room)}
+func NewHub() *Hub {
+	return &Hub{rooms: make(map[string]*Room)}
 }
 
-func (h *RoomHub) Join(roomID string, c *Client) ([]roomParticipant, []socketMessage, error) {
+func NewClient(roomID string, user *model.User, conn *websocket.Conn, hub *Hub) *Client {
+	return &Client{
+		id:     NewID(),
+		roomID: roomID,
+		user:   user,
+		conn:   conn,
+		send:   make(chan []byte, 32),
+		hub:    hub,
+	}
+}
+
+func (c *Client) ID() string {
+	return c.id
+}
+
+func (c *Client) Send() chan<- []byte {
+	return c.send
+}
+
+func NewID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("generate id")
+	}
+
+	return hex.EncodeToString(b[:])
+}
+
+func MustJSON(msg Message) []byte {
+	payload, err := json.Marshal(msg)
+	if err != nil {
+		panic(err)
+	}
+
+	return payload
+}
+
+func (h *Hub) Join(roomID string, c *Client) ([]Participant, []Message, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -83,7 +121,7 @@ func (h *RoomHub) Join(roomID string, c *Client) ([]roomParticipant, []socketMes
 	return room.snapshotParticipants(), room.snapshotHistory(), nil
 }
 
-func (h *RoomHub) Leave(roomID string, c *Client) []roomParticipant {
+func (h *Hub) Leave(roomID string, c *Client) []Participant {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -103,7 +141,7 @@ func (h *RoomHub) Leave(roomID string, c *Client) []roomParticipant {
 	return room.snapshotParticipants()
 }
 
-func (h *RoomHub) Broadcast(roomID string, message socketMessage, except *Client) {
+func (h *Hub) Broadcast(roomID string, message Message, except *Client) {
 	payload, err := json.Marshal(message)
 	if err != nil {
 		log.Printf("marshal socket message: %v", err)
@@ -137,12 +175,12 @@ func (h *RoomHub) Broadcast(roomID string, message socketMessage, except *Client
 		select {
 		case client.send <- payload:
 		default:
-			go client.close()
+			go client.Close()
 		}
 	}
 }
 
-func (h *RoomHub) BroadcastParticipants(roomID string) {
+func (h *Hub) BroadcastParticipants(roomID string) {
 	h.mu.Lock()
 	room := h.rooms[roomID]
 	if room == nil {
@@ -157,7 +195,7 @@ func (h *RoomHub) BroadcastParticipants(roomID string) {
 	}
 	h.mu.Unlock()
 
-	message := socketMessage{
+	message := Message{
 		Type:         "participants",
 		Participants: participants,
 	}
@@ -171,15 +209,15 @@ func (h *RoomHub) BroadcastParticipants(roomID string) {
 		select {
 		case client.send <- payload:
 		default:
-			go client.close()
+			go client.Close()
 		}
 	}
 }
 
-func (r *Room) snapshotParticipants() []roomParticipant {
-	participants := make([]roomParticipant, 0, len(r.clients))
+func (r *Room) snapshotParticipants() []Participant {
+	participants := make([]Participant, 0, len(r.clients))
 	for client := range r.clients {
-		participants = append(participants, roomParticipant{
+		participants = append(participants, Participant{
 			ID:    client.id,
 			Email: client.user.Email,
 		})
@@ -191,69 +229,17 @@ func (r *Room) snapshotParticipants() []roomParticipant {
 	return participants
 }
 
-func (r *Room) snapshotHistory() []socketMessage {
-	history := make([]socketMessage, len(r.messages))
+func (r *Room) snapshotHistory() []Message {
+	history := make([]Message, len(r.messages))
 	copy(history, r.messages)
 	return history
 }
 
-func (a *App) roomSocketHandler(w http.ResponseWriter, r *http.Request) {
-	user := a.mustCurrentUser(r)
-	if user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	roomID := chi.URLParam(r, "id")
-	if _, err := a.store.FindTrainingByID(r.Context(), roomID); err != nil {
-		if errors.Is(err, ErrNotFound) {
-			http.NotFound(w, r)
-			return
-		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
-
-	client := &Client{
-		id:     newID(),
-		roomID: roomID,
-		user:   user,
-		conn:   conn,
-		send:   make(chan []byte, 32),
-		hub:    a.hub,
-	}
-
-	participants, history, err := a.hub.Join(roomID, client)
-	if err != nil {
-		_ = conn.WriteJSON(socketMessage{Type: "room-full"})
-		_ = conn.Close()
-		return
-	}
-
-	client.send <- mustJSON(socketMessage{
-		Type:         "welcome",
-		ClientID:     client.id,
-		Participants: participants,
-		History:      history,
-	})
-	log.Printf("room=%s welcome user=%s client=%s history=%d participants=%d", roomID, user.Email, client.id, len(history), len(participants))
-	a.hub.BroadcastParticipants(roomID)
-
-	go client.writePump()
-	client.readPump()
-}
-
-func (c *Client) readPump() {
-	defer c.close()
+func (c *Client) ReadPump() {
+	defer c.Close()
 
 	for {
-		var incoming socketMessage
+		var incoming Message
 		if err := c.conn.ReadJSON(&incoming); err != nil {
 			return
 		}
@@ -265,7 +251,7 @@ func (c *Client) readPump() {
 				continue
 			}
 			log.Printf("room=%s chat from=%s client=%s text=%q", c.roomID, c.user.Email, c.id, text)
-			c.hub.Broadcast(c.roomID, socketMessage{
+			c.hub.Broadcast(c.roomID, Message{
 				Type:        "chat",
 				Text:        text,
 				SenderID:    c.id,
@@ -274,7 +260,7 @@ func (c *Client) readPump() {
 			}, nil)
 		case "signal":
 			log.Printf("room=%s signal from=%s client=%s type=%s", c.roomID, c.user.Email, c.id, incoming.SignalType)
-			c.hub.Broadcast(c.roomID, socketMessage{
+			c.hub.Broadcast(c.roomID, Message{
 				Type:        "signal",
 				SignalType:  incoming.SignalType,
 				Data:        incoming.Data,
@@ -285,8 +271,8 @@ func (c *Client) readPump() {
 	}
 }
 
-func (c *Client) writePump() {
-	defer c.close()
+func (c *Client) WritePump() {
+	defer c.Close()
 
 	for msg := range c.send {
 		if err := c.conn.WriteMessage(websocket.TextMessage, msg); err != nil {
@@ -295,7 +281,7 @@ func (c *Client) writePump() {
 	}
 }
 
-func (c *Client) close() {
+func (c *Client) Close() {
 	c.once.Do(func() {
 		_ = c.conn.Close()
 		participants := c.hub.Leave(c.roomID, c)
@@ -304,13 +290,4 @@ func (c *Client) close() {
 		}
 		close(c.send)
 	})
-}
-
-func mustJSON(msg socketMessage) []byte {
-	payload, err := json.Marshal(msg)
-	if err != nil {
-		panic(err)
-	}
-
-	return payload
 }

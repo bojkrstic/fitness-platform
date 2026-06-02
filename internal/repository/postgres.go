@@ -1,36 +1,51 @@
-package main
+package repository
 
 import (
 	"context"
+	crand "crypto/rand"
 	"database/sql"
-	"embed"
+	"encoding/hex"
 	"errors"
 	"fmt"
-	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 
+	"fitnes-platform/internal/model"
+
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
-
-//go:embed migrations/*.sql
-var migrationFiles embed.FS
 
 var ErrNotFound = errors.New("not found")
 
 type Store interface {
 	Init(ctx context.Context) error
 	Close() error
-	CreateUser(ctx context.Context, email, passwordHash, role string) (User, error)
-	FindAuthUserByEmail(ctx context.Context, email string) (AuthUser, error)
-	FindUserByID(ctx context.Context, id string) (User, error)
-	ListTrainings(ctx context.Context) ([]Training, error)
-	FindTrainingByID(ctx context.Context, id string) (Training, error)
-	CreateTraining(ctx context.Context, input TrainingForm, createdBy string) (Training, error)
+	CreateUser(ctx context.Context, email, passwordHash, role string) (model.User, error)
+	UpsertUser(ctx context.Context, email, passwordHash, role string) (model.User, error)
+	FindAuthUserByEmail(ctx context.Context, email string) (model.AuthUser, error)
+	FindUserByID(ctx context.Context, id string) (model.User, error)
+	ListTrainings(ctx context.Context) ([]model.Training, error)
+	FindTrainingByID(ctx context.Context, id string) (model.Training, error)
+	CreateTraining(ctx context.Context, input model.TrainingForm, createdBy string) (model.Training, error)
 }
 
 type PostgresStore struct {
 	db *sql.DB
+}
+
+func OpenDatabase(ctx context.Context, dsn string) (*sql.DB, error) {
+	db, err := sql.Open("pgx", dsn)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.PingContext(ctx); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+
+	return db, nil
 }
 
 func NewPostgresStore(db *sql.DB) *PostgresStore {
@@ -51,7 +66,7 @@ func (s *PostgresStore) Init(ctx context.Context) error {
 		return fmt.Errorf("create migration table: %w", err)
 	}
 
-	entries, err := fs.ReadDir(migrationFiles, "migrations")
+	entries, err := os.ReadDir("migrations")
 	if err != nil {
 		return fmt.Errorf("read migrations: %w", err)
 	}
@@ -77,7 +92,7 @@ func (s *PostgresStore) Init(ctx context.Context) error {
 			continue
 		}
 
-		content, err := migrationFiles.ReadFile("migrations/" + entry.Name())
+		content, err := os.ReadFile(filepath.Join("migrations", entry.Name()))
 		if err != nil {
 			return fmt.Errorf("read migration %s: %w", entry.Name(), err)
 		}
@@ -109,7 +124,7 @@ func (s *PostgresStore) Init(ctx context.Context) error {
 	return nil
 }
 
-func (s *PostgresStore) CreateUser(ctx context.Context, email, passwordHash, role string) (User, error) {
+func (s *PostgresStore) CreateUser(ctx context.Context, email, passwordHash, role string) (model.User, error) {
 	id := newID()
 	_, err := s.db.ExecContext(
 		ctx,
@@ -117,49 +132,69 @@ func (s *PostgresStore) CreateUser(ctx context.Context, email, passwordHash, rol
 		id, email, passwordHash, role,
 	)
 	if err != nil {
-		return User{}, fmt.Errorf("insert user: %w", err)
+		return model.User{}, fmt.Errorf("insert user: %w", err)
 	}
 
-	return User{ID: id, Email: email, Role: role}, nil
+	return model.User{ID: id, Email: email, Role: role}, nil
 }
 
-func (s *PostgresStore) FindAuthUserByEmail(ctx context.Context, email string) (AuthUser, error) {
+func (s *PostgresStore) UpsertUser(ctx context.Context, email, passwordHash, role string) (model.User, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO users (id, email, password_hash, role)
+		 VALUES ($1, $2, $3, $4)
+		 ON CONFLICT (email) DO UPDATE
+		 SET password_hash = EXCLUDED.password_hash,
+		     role = EXCLUDED.role
+		 RETURNING id, email, role`,
+		newID(), email, passwordHash, role,
+	)
+
+	var u model.User
+	if err := row.Scan(&u.ID, &u.Email, &u.Role); err != nil {
+		return model.User{}, fmt.Errorf("upsert user: %w", err)
+	}
+
+	return u, nil
+}
+
+func (s *PostgresStore) FindAuthUserByEmail(ctx context.Context, email string) (model.AuthUser, error) {
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, email, password_hash, role FROM users WHERE email = $1`,
 		email,
 	)
 
-	var u AuthUser
+	var u model.AuthUser
 	if err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.Role); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return AuthUser{}, ErrNotFound
+			return model.AuthUser{}, ErrNotFound
 		}
-		return AuthUser{}, fmt.Errorf("find auth user: %w", err)
+		return model.AuthUser{}, fmt.Errorf("find auth user: %w", err)
 	}
 
 	return u, nil
 }
 
-func (s *PostgresStore) FindUserByID(ctx context.Context, id string) (User, error) {
+func (s *PostgresStore) FindUserByID(ctx context.Context, id string) (model.User, error) {
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, email, role FROM users WHERE id = $1`,
 		id,
 	)
 
-	var u User
+	var u model.User
 	if err := row.Scan(&u.ID, &u.Email, &u.Role); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return User{}, ErrNotFound
+			return model.User{}, ErrNotFound
 		}
-		return User{}, fmt.Errorf("find user: %w", err)
+		return model.User{}, fmt.Errorf("find user: %w", err)
 	}
 
 	return u, nil
 }
 
-func (s *PostgresStore) ListTrainings(ctx context.Context) ([]Training, error) {
+func (s *PostgresStore) ListTrainings(ctx context.Context) ([]model.Training, error) {
 	rows, err := s.db.QueryContext(
 		ctx,
 		`SELECT id, title, trainer, description, time, created_by
@@ -171,9 +206,9 @@ func (s *PostgresStore) ListTrainings(ctx context.Context) ([]Training, error) {
 	}
 	defer rows.Close()
 
-	var trainings []Training
+	var trainings []model.Training
 	for rows.Next() {
-		var t Training
+		var t model.Training
 		if err := rows.Scan(&t.ID, &t.Title, &t.Trainer, &t.Description, &t.Time, &t.CreatedBy); err != nil {
 			return nil, fmt.Errorf("scan training: %w", err)
 		}
@@ -186,7 +221,7 @@ func (s *PostgresStore) ListTrainings(ctx context.Context) ([]Training, error) {
 	return trainings, nil
 }
 
-func (s *PostgresStore) FindTrainingByID(ctx context.Context, id string) (Training, error) {
+func (s *PostgresStore) FindTrainingByID(ctx context.Context, id string) (model.Training, error) {
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, title, trainer, description, time, created_by
@@ -195,18 +230,18 @@ func (s *PostgresStore) FindTrainingByID(ctx context.Context, id string) (Traini
 		id,
 	)
 
-	var t Training
+	var t model.Training
 	if err := row.Scan(&t.ID, &t.Title, &t.Trainer, &t.Description, &t.Time, &t.CreatedBy); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return Training{}, ErrNotFound
+			return model.Training{}, ErrNotFound
 		}
-		return Training{}, fmt.Errorf("find training: %w", err)
+		return model.Training{}, fmt.Errorf("find training: %w", err)
 	}
 
 	return t, nil
 }
 
-func (s *PostgresStore) CreateTraining(ctx context.Context, input TrainingForm, createdBy string) (Training, error) {
+func (s *PostgresStore) CreateTraining(ctx context.Context, input model.TrainingForm, createdBy string) (model.Training, error) {
 	id := newID()
 	_, err := s.db.ExecContext(
 		ctx,
@@ -215,10 +250,10 @@ func (s *PostgresStore) CreateTraining(ctx context.Context, input TrainingForm, 
 		id, input.Title, input.Trainer, input.Description, input.Time, createdBy,
 	)
 	if err != nil {
-		return Training{}, fmt.Errorf("insert training: %w", err)
+		return model.Training{}, fmt.Errorf("insert training: %w", err)
 	}
 
-	return Training{
+	return model.Training{
 		ID:          id,
 		Title:       input.Title,
 		Trainer:     input.Trainer,
@@ -226,4 +261,13 @@ func (s *PostgresStore) CreateTraining(ctx context.Context, input TrainingForm, 
 		Time:        input.Time,
 		CreatedBy:   createdBy,
 	}, nil
+}
+
+func newID() string {
+	var b [16]byte
+	if _, err := crand.Read(b[:]); err != nil {
+		panic(fmt.Sprintf("generate id: %v", err))
+	}
+
+	return hex.EncodeToString(b[:])
 }
