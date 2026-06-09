@@ -24,7 +24,7 @@
 
   <section class="card stack">
     <div class="label">Video</div>
-    <p class="muted small">Chat supports up to five participants per room. Video uses peer-to-peer WebRTC signaling and is intended for two participants.</p>
+    <p class="muted small">Admin streams video to the room. Members watch the stream and use chat for questions.</p>
     <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <div class="meta">
@@ -37,6 +37,7 @@
 (() => {
   const roomID = "{{.Training.ID}}";
   const currentUser = "{{.CurrentUser.Email}}";
+  const isAdmin = "{{.CurrentUser.Role}}" === "admin";
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
   const chatLog = document.getElementById("chat-log");
@@ -46,14 +47,15 @@
   const remoteVideo = document.getElementById("remote-video");
   const stateBadge = document.getElementById("video-state");
 
-  const maxVideoParticipants = 2;
   let myClientId = null;
-  let isInitiator = false;
-  let offerSent = false;
   let videoStarted = false;
   let participants = [];
   let localStream = null;
-  let peerConnection = null;
+  let viewerConnection = null;
+  let broadcasterId = null;
+  const broadcasterConnections = new Map();
+  const pendingViewerIce = [];
+  const pendingBroadcasterIce = new Map();
 
   const pcConfig = {
     iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
@@ -79,90 +81,178 @@
     stateBadge.textContent = value;
   }
 
-  function ensurePeerConnection() {
-    if (peerConnection) return peerConnection;
-
-    peerConnection = new RTCPeerConnection(pcConfig);
-    peerConnection.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.send(JSON.stringify({
-          type: "signal",
-          signalType: "ice",
-          data: event.candidate,
-        }));
-      }
-    };
-    peerConnection.ontrack = (event) => {
-      remoteVideo.srcObject = event.streams[0];
-      setState("Connected");
-    };
-    if (localStream) {
-      localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
+  function setupVideoLayout() {
+    if (isAdmin) {
+      remoteVideo.style.display = "none";
+    } else {
+      localVideo.style.display = "none";
     }
-
-    return peerConnection;
   }
 
-  async function startLocalMedia() {
+  function sendSignal(targetId, signalType, data) {
+    if (!targetId || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({
+      type: "signal",
+      targetId,
+      signalType,
+      data,
+    }));
+  }
+
+  function ensureViewerConnection(targetAdminId) {
+    if (viewerConnection) return viewerConnection;
+
+    viewerConnection = new RTCPeerConnection(pcConfig);
+    viewerConnection.onicecandidate = (event) => {
+      if (event.candidate && targetAdminId) {
+        sendSignal(targetAdminId, "ice", event.candidate);
+      }
+    };
+    viewerConnection.ontrack = (event) => {
+      remoteVideo.srcObject = event.streams[0];
+      setState("Watching live");
+    };
+    viewerConnection.onconnectionstatechange = () => {
+      if (viewerConnection.connectionState === "failed") {
+        setState("Video connection failed");
+      }
+    };
+
+    return viewerConnection;
+  }
+
+  function ensureBroadcasterConnection(viewerId) {
+    const existing = broadcasterConnections.get(viewerId);
+    if (existing) return existing;
+
+    const pc = new RTCPeerConnection(pcConfig);
+    pc.onicecandidate = (event) => {
+      if (event.candidate) {
+        sendSignal(viewerId, "ice", event.candidate);
+      }
+    };
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        broadcasterConnections.delete(viewerId);
+      }
+    };
+    if (localStream) {
+      localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+    }
+
+    broadcasterConnections.set(viewerId, pc);
+    return pc;
+  }
+
+  async function addIceWhenReady(pc, candidate, queue) {
+    if (!pc.remoteDescription) {
+      queue.push(candidate);
+      return;
+    }
+
+    try {
+      await pc.addIceCandidate(candidate);
+    } catch (err) {
+      console.warn("ICE candidate error", err);
+    }
+  }
+
+  async function flushIceQueue(pc, queue) {
+    while (queue.length > 0) {
+      const candidate = queue.shift();
+      try {
+        await pc.addIceCandidate(candidate);
+      } catch (err) {
+        console.warn("ICE candidate error", err);
+      }
+    }
+  }
+
+  function broadcasterIceQueue(senderId) {
+    if (!pendingBroadcasterIce.has(senderId)) {
+      pendingBroadcasterIce.set(senderId, []);
+    }
+    return pendingBroadcasterIce.get(senderId);
+  }
+
+  async function startAdminMedia() {
     if (videoStarted) return;
     videoStarted = true;
 
     try {
+      if (!window.isSecureContext) {
+        appendMessage("System", "Camera requires HTTPS or localhost. Open this room over a secure origin.", "system");
+        setState("Secure context required");
+        return;
+      }
+
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
-      if (peerConnection) {
-        localStream.getTracks().forEach((track) => peerConnection.addTrack(track, localStream));
-      }
+      setState("Live setup");
     } catch (err) {
-      appendMessage("System", "Camera or microphone access was blocked.", "system");
+      appendMessage("System", "Camera access was blocked or unavailable.", "system");
       setState("Media blocked");
     }
-  }
-
-  function isVideoParticipant() {
-    if (!myClientId) return false;
-    return participants.slice(0, maxVideoParticipants).some((participant) => participant.id === myClientId);
   }
 
   async function syncVideoState() {
     if (!myClientId) return;
 
-    if (participants.length < maxVideoParticipants) {
-      setState("Waiting for partner");
+    const admin = participants.find((participant) => participant.role === "admin");
+    broadcasterId = admin ? admin.id : null;
+
+    if (!isAdmin) {
+      setState(broadcasterId ? "Waiting for stream" : "Waiting for admin");
       return;
     }
 
-    if (!isVideoParticipant()) {
-      setState("Chat only");
+    await startAdminMedia();
+    if (!localStream) {
       return;
     }
 
-    await startLocalMedia();
-    isInitiator = participants[0] && participants[0].id === myClientId;
-    if (isInitiator) {
-      ensurePeerConnection();
-      await makeOffer();
-      setState("Calling");
-    } else {
-      setState("Waiting for offer");
+    const viewerIds = participants
+      .filter((participant) => participant.id !== myClientId)
+      .map((participant) => participant.id);
+
+    for (const [viewerId, pc] of broadcasterConnections) {
+      if (!viewerIds.includes(viewerId)) {
+        pc.close();
+        broadcasterConnections.delete(viewerId);
+      }
     }
+
+    if (viewerIds.length === 0) {
+      setState("Live, waiting for viewers");
+      return;
+    }
+
+    for (const viewerId of viewerIds) {
+      if (broadcasterConnections.has(viewerId)) continue;
+      await sendOfferToViewer(viewerId);
+    }
+    setState(`Live to ${viewerIds.length}`);
   }
 
-  async function makeOffer() {
-    if (offerSent) return;
-    offerSent = true;
-    const pc = ensurePeerConnection();
+  async function sendOfferToViewer(viewerId) {
+    const pc = ensureBroadcasterConnection(viewerId);
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    socket.send(JSON.stringify({
-      type: "signal",
-      signalType: "offer",
-      data: offer,
-    }));
+    sendSignal(viewerId, "offer", offer);
   }
 
   socket.addEventListener("open", () => {
+    setupVideoLayout();
     appendMessage("System", `Connected as ${currentUser}`, "system");
+  });
+
+  socket.addEventListener("close", () => {
+    setState("Disconnected");
+  });
+
+  socket.addEventListener("error", () => {
+    appendMessage("System", "Connection error. Refresh the room and try again.", "system");
+    setState("Connection error");
   });
 
   socket.addEventListener("message", async (event) => {
@@ -203,26 +293,34 @@
     }
 
     if (msg.type === "signal") {
-      if (!isVideoParticipant()) return;
-      const pc = ensurePeerConnection();
+      if (isAdmin) {
+        const pc = broadcasterConnections.get(msg.senderId);
+        const queue = broadcasterIceQueue(msg.senderId);
+        if (msg.signalType === "answer") {
+          if (!pc) return;
+          await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+          await flushIceQueue(pc, queue);
+        } else if (msg.signalType === "ice" && msg.data) {
+          if (!pc) {
+            queue.push(msg.data);
+            return;
+          }
+          await addIceWhenReady(pc, msg.data, queue);
+        }
+        return;
+      }
 
       if (msg.signalType === "offer") {
+        broadcasterId = msg.senderId;
+        const pc = ensureViewerConnection(broadcasterId);
         await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        await flushIceQueue(pc, pendingViewerIce);
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
-        socket.send(JSON.stringify({
-          type: "signal",
-          signalType: "answer",
-          data: answer,
-        }));
-      } else if (msg.signalType === "answer") {
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.data));
+        sendSignal(broadcasterId, "answer", answer);
       } else if (msg.signalType === "ice" && msg.data) {
-        try {
-          await pc.addIceCandidate(msg.data);
-        } catch (err) {
-          console.warn("ICE candidate error", err);
-        }
+        const pc = ensureViewerConnection(broadcasterId || msg.senderId);
+        await addIceWhenReady(pc, msg.data, pendingViewerIce);
       }
     }
   });
@@ -240,9 +338,10 @@
   });
 
   window.addEventListener("beforeunload", () => {
-    if (peerConnection) {
-      peerConnection.close();
+    if (viewerConnection) {
+      viewerConnection.close();
     }
+    broadcasterConnections.forEach((pc) => pc.close());
     if (localStream) {
       localStream.getTracks().forEach((track) => track.stop());
     }

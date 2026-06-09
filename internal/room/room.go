@@ -48,6 +48,7 @@ type Client struct {
 type Participant struct {
 	ID    string `json:"id"`
 	Email string `json:"email"`
+	Role  string `json:"role"`
 }
 
 type Message struct {
@@ -57,6 +58,7 @@ type Message struct {
 	Data         json.RawMessage `json:"data,omitempty"`
 	SenderID     string          `json:"senderId,omitempty"`
 	SenderEmail  string          `json:"senderEmail,omitempty"`
+	TargetID     string          `json:"targetId,omitempty"`
 	Participants []Participant   `json:"participants,omitempty"`
 	History      []Message       `json:"history,omitempty"`
 	ClientID     string          `json:"clientId,omitempty"`
@@ -182,6 +184,41 @@ func (h *Hub) Broadcast(roomID string, message Message, except *Client) {
 	}
 }
 
+func (h *Hub) SendTo(roomID, targetID string, message Message) {
+	payload, err := json.Marshal(message)
+	if err != nil {
+		log.Printf("marshal socket message: %v", err)
+		return
+	}
+
+	h.mu.Lock()
+	room := h.rooms[roomID]
+	if room == nil {
+		h.mu.Unlock()
+		return
+	}
+
+	var target *Client
+	for client := range room.clients {
+		if client.id == targetID {
+			target = client
+			break
+		}
+	}
+	h.mu.Unlock()
+
+	if target == nil {
+		return
+	}
+
+	log.Printf("room=%s send type=%s from=%s to=%s", roomID, message.Type, message.SenderEmail, target.user.Email)
+	select {
+	case target.send <- payload:
+	default:
+		go target.Close()
+	}
+}
+
 func (h *Hub) BroadcastParticipants(roomID string) {
 	h.mu.Lock()
 	room := h.rooms[roomID]
@@ -222,6 +259,7 @@ func (r *Room) snapshotParticipants() []Participant {
 		participants = append(participants, Participant{
 			ID:    client.id,
 			Email: client.user.Email,
+			Role:  client.user.Role,
 		})
 	}
 
@@ -262,13 +300,19 @@ func (c *Client) ReadPump() {
 			}, nil)
 		case "signal":
 			log.Printf("room=%s signal from=%s client=%s type=%s", c.roomID, c.user.Email, c.id, incoming.SignalType)
-			c.hub.Broadcast(c.roomID, Message{
+			message := Message{
 				Type:        "signal",
 				SignalType:  incoming.SignalType,
 				Data:        incoming.Data,
 				SenderID:    c.id,
 				SenderEmail: c.user.Email,
-			}, c)
+				TargetID:    incoming.TargetID,
+			}
+			if incoming.TargetID != "" {
+				c.hub.SendTo(c.roomID, incoming.TargetID, message)
+				continue
+			}
+			c.hub.Broadcast(c.roomID, message, c)
 		}
 	}
 }
