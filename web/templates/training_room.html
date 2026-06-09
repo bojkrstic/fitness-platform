@@ -24,7 +24,7 @@
 
   <section class="card stack">
     <div class="label">Video</div>
-    <p class="muted small">This room uses a peer-to-peer WebRTC connection with websocket signaling. It currently supports two participants per room.</p>
+    <p class="muted small">Chat supports up to five participants per room. Video uses peer-to-peer WebRTC signaling and is intended for two participants.</p>
     <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <div class="meta">
@@ -35,8 +35,8 @@
 
 <script>
 (() => {
-  const roomID = {{printf "%q" .Training.ID}};
-  const currentUser = {{printf "%q" .CurrentUser.Email}};
+  const roomID = "{{.Training.ID}}";
+  const currentUser = "{{.CurrentUser.Email}}";
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
   const chatLog = document.getElementById("chat-log");
@@ -46,10 +46,11 @@
   const remoteVideo = document.getElementById("remote-video");
   const stateBadge = document.getElementById("video-state");
 
-  const clientId = crypto.randomUUID();
+  const maxVideoParticipants = 2;
   let myClientId = null;
   let isInitiator = false;
   let offerSent = false;
+  let videoStarted = false;
   let participants = [];
   let localStream = null;
   let peerConnection = null;
@@ -103,6 +104,9 @@
   }
 
   async function startLocalMedia() {
+    if (videoStarted) return;
+    videoStarted = true;
+
     try {
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
@@ -112,6 +116,35 @@
     } catch (err) {
       appendMessage("System", "Camera or microphone access was blocked.", "system");
       setState("Media blocked");
+    }
+  }
+
+  function isVideoParticipant() {
+    if (!myClientId) return false;
+    return participants.slice(0, maxVideoParticipants).some((participant) => participant.id === myClientId);
+  }
+
+  async function syncVideoState() {
+    if (!myClientId) return;
+
+    if (participants.length < maxVideoParticipants) {
+      setState("Waiting for partner");
+      return;
+    }
+
+    if (!isVideoParticipant()) {
+      setState("Chat only");
+      return;
+    }
+
+    await startLocalMedia();
+    isInitiator = participants[0] && participants[0].id === myClientId;
+    if (isInitiator) {
+      ensurePeerConnection();
+      await makeOffer();
+      setState("Calling");
+    } else {
+      setState("Waiting for offer");
     }
   }
 
@@ -128,14 +161,27 @@
     }));
   }
 
-  socket.addEventListener("open", async () => {
+  socket.addEventListener("open", () => {
     appendMessage("System", `Connected as ${currentUser}`, "system");
-    await startLocalMedia();
-    socket.send(JSON.stringify({ type: "join", clientId }));
   });
 
   socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
+
+    if (msg.type === "chat") {
+      if (msg.senderId && msg.senderId === myClientId) {
+        return;
+      }
+      appendMessage(msg.senderEmail || "Guest", msg.text, "chat");
+      return;
+    }
+
+    if (msg.type === "room-full") {
+      appendMessage("System", "This room already has five participants.", "system");
+      setState("Room full");
+      socket.close();
+      return;
+    }
 
     if (msg.type === "welcome") {
       myClientId = msg.clientId;
@@ -146,54 +192,18 @@
         }
         appendMessage(pastMsg.senderEmail || "Guest", pastMsg.text || "", "chat");
       });
-      isInitiator = participants.length === 2 && participants[0].id === myClientId;
-      if (participants.length > 1) {
-        if (isInitiator) {
-          ensurePeerConnection();
-          await makeOffer();
-          setState("Calling");
-        } else {
-          setState("Waiting for offer");
-        }
-      } else {
-        setState("Waiting for partner");
-      }
-      return;
-    }
-
-    if (msg.type === "room-full") {
-      appendMessage("System", "This room already has two participants.", "system");
-      setState("Room full");
-      socket.close();
+      void syncVideoState();
       return;
     }
 
     if (msg.type === "participants") {
       participants = msg.participants || [];
-      if (participants.length === 2 && myClientId) {
-        isInitiator = participants[0].id === myClientId;
-        if (isInitiator) {
-          ensurePeerConnection();
-          await makeOffer();
-          setState("Calling");
-        } else {
-          setState("Waiting for offer");
-        }
-      } else if (participants.length === 1) {
-        setState("Waiting for partner");
-      }
-      return;
-    }
-
-    if (msg.type === "chat") {
-      if (msg.senderId && msg.senderId === myClientId) {
-        return;
-      }
-      appendMessage(msg.senderEmail || "Guest", msg.text, "chat");
+      void syncVideoState();
       return;
     }
 
     if (msg.type === "signal") {
+      if (!isVideoParticipant()) return;
       const pc = ensurePeerConnection();
 
       if (msg.signalType === "offer") {

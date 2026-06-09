@@ -17,6 +17,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const MaxParticipants = 5
+
 var ErrRoomFull = errors.New("room full")
 
 var Upgrader = websocket.Upgrader{
@@ -112,7 +114,7 @@ func (h *Hub) Join(roomID string, c *Client) ([]Participant, []Message, error) {
 		h.rooms[roomID] = room
 	}
 
-	if len(room.clients) >= 2 {
+	if len(room.clients) >= MaxParticipants {
 		return nil, nil, ErrRoomFull
 	}
 
