@@ -6,7 +6,7 @@ services:
       POSTGRES_USER: fitness
       POSTGRES_PASSWORD: fitness
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - fitness_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -28,7 +28,7 @@ services:
       SEED_ADMIN_EMAIL: admin@fitness.local
       SEED_ADMIN_PASSWORD: Admin123!
     ports:
-      - "8080:8080"
+      - "8020:8080"
 
 volumes:
   fitness_pgdata:

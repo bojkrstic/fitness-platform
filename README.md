@@ -15,7 +15,22 @@ Go + Gin aplikacija sa PostgreSQL bazom, auth sistemom, admin panelom, training 
 - `migrations` - SQL migracije
 
 ## Pokretanje
+
+```bash
 docker compose up --build
+```
+
+Nakon starta aplikacija je dostupna na:
+
+```text
+http://localhost:8020
+```
+
+Primer training URL-a:
+
+```text
+http://localhost:8020/trainings/3c4efed8f37fca7b0d3afbaf5401b859
+```
 
 ### Docker
 
@@ -24,13 +39,18 @@ make up
 ```
 
 To podiže:
-- PostgreSQL na `localhost:5432`
-- aplikaciju na `http://localhost:8080`
+- PostgreSQL na `localhost:5433`
+- aplikaciju na `http://localhost:8020`
+
+Unutar Docker mreže aplikacija se kači na bazu preko adrese `db:5432`.
+Sa host mašine baza je dostupna na `localhost:5433`.
 
 ### Lokalno
 
+Ako aplikaciju pokrećeš lokalno preko `go run`, `make dev` ili lokalnog binarnog fajla, a bazu preko Docker Compose-a, koristi `localhost:5433`:
+
 ```bash
-export DATABASE_URL='postgres://fitness:fitness@localhost:5432/fitness?sslmode=disable'
+export DATABASE_URL='postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable'
 export PORT=8080
 export SEED_ADMIN_EMAIL='admin@fitness.local'
 export SEED_ADMIN_PASSWORD='Admin123!'
@@ -49,7 +69,7 @@ make dev
 Ako želiš da koristiš `.env` fajl u root-u projekta:
 
 ```env
-DATABASE_URL=postgres://fitness:fitness@localhost:5432/fitness?sslmode=disable
+DATABASE_URL=postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable
 PORT=8080
 SEED_ADMIN_EMAIL=admin@fitness.local
 SEED_ADMIN_PASSWORD=Admin123!
@@ -70,3 +90,4 @@ SEED_ADMIN_PASSWORD=Admin123!
 - `make up` i `docker compose up --build` podižu bazu i aplikaciju zajedno.
 - Aplikacija automatski primenjuje SQL migracije pri startu.
 - Ako koristiš `make dev` ili `./fitnes-api` lokalno, PostgreSQL mora biti dostupan na adresi iz `DATABASE_URL`.
+- Ako koristiš Docker Compose aplikaciju, otvaraj `http://localhost:8020`, jer je container port `8080` mapiran na host port `8020`.
