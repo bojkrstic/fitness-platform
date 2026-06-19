@@ -46,6 +46,7 @@
   const localVideo = document.getElementById("local-video");
   const remoteVideo = document.getElementById("remote-video");
   const stateBadge = document.getElementById("video-state");
+  const iceServers = {{json .ICEServers}};
 
   let myClientId = null;
   let videoStarted = false;
@@ -57,9 +58,7 @@
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
 
-  const pcConfig = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  };
+  const pcConfig = { iceServers };
 
   function appendMessage(label, text, tone) {
     const wrap = document.createElement("div");
@@ -115,6 +114,9 @@
     viewerConnection.onconnectionstatechange = () => {
       if (viewerConnection.connectionState === "failed") {
         setState("Video connection failed");
+        appendMessage("System", "Video could not cross the network. Configure a TURN server for external viewers.", "system");
+      } else if (viewerConnection.connectionState === "disconnected") {
+        setState("Video disconnected");
       }
     };
 
@@ -134,6 +136,9 @@
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed" || pc.connectionState === "closed") {
         broadcasterConnections.delete(viewerId);
+      }
+      if (pc.connectionState === "failed") {
+        appendMessage("System", "A viewer could not connect to the video stream. Configure a TURN server for external networks.", "system");
       }
     };
     if (localStream) {

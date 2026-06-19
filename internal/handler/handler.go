@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"html/template"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 
+	"fitnes-platform/internal/config"
 	"fitnes-platform/internal/model"
 	"fitnes-platform/internal/repository"
 	"fitnes-platform/internal/room"
@@ -24,9 +26,10 @@ type HttpHandler struct {
 	hub       *room.Hub
 	templates map[string]*template.Template
 	router    *gin.Engine
+	cfg       config.Config
 }
 
-func NewHttpHandler(svc *service.Service) *HttpHandler {
+func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 	gin.SetMode(gin.ReleaseMode)
 
 	h := &HttpHandler{
@@ -34,6 +37,7 @@ func NewHttpHandler(svc *service.Service) *HttpHandler {
 		sessions:  session.NewManager(),
 		hub:       room.NewHub(),
 		templates: mustLoadTemplates(),
+		cfg:       cfg,
 	}
 
 	router := gin.New()
@@ -79,7 +83,16 @@ func mustLoadTemplates() map[string]*template.Template {
 	}
 
 	for name, pageFile := range pageFiles {
-		tpl := template.Must(template.ParseFiles("web/templates/layout.html", pageFile))
+		funcs := template.FuncMap{
+			"json": func(v any) template.JS {
+				payload, err := json.Marshal(v)
+				if err != nil {
+					return "null"
+				}
+				return template.JS(payload)
+			},
+		}
+		tpl := template.Must(template.New("layout.html").Funcs(funcs).ParseFiles("web/templates/layout.html", pageFile))
 		pages[name] = tpl
 	}
 
@@ -212,6 +225,7 @@ func (h *HttpHandler) trainingRoomHandler(c *gin.Context) {
 	h.renderPage(c, http.StatusOK, "training_room", model.TrainingRoomPageData{
 		BasePageData: model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
 		Training:     training,
+		ICEServers:   h.cfg.WebRTCICEServers,
 	})
 }
 

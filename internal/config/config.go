@@ -2,6 +2,7 @@ package config
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -12,10 +13,22 @@ type Config struct {
 	Port              string
 	SeedAdminEmail    string
 	SeedAdminPassword string
+	WebRTCICEServers  []ICEServer
+}
+
+type ICEServer struct {
+	URLs       any    `json:"urls"`
+	Username   string `json:"username,omitempty"`
+	Credential string `json:"credential,omitempty"`
 }
 
 func Load() (Config, error) {
 	if err := loadDotEnv(); err != nil {
+		return Config{}, err
+	}
+
+	iceServers, err := loadICEServers()
+	if err != nil {
 		return Config{}, err
 	}
 
@@ -24,6 +37,7 @@ func Load() (Config, error) {
 		Port:              envOrDefault("PORT", "8080"),
 		SeedAdminEmail:    envOrDefault("SEED_ADMIN_EMAIL", "admin@fitness.local"),
 		SeedAdminPassword: envOrDefault("SEED_ADMIN_PASSWORD", "Admin123!"),
+		WebRTCICEServers:  iceServers,
 	}
 
 	if cfg.DBURL == "" {
@@ -31,6 +45,43 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func loadICEServers() ([]ICEServer, error) {
+	raw := strings.TrimSpace(os.Getenv("WEBRTC_ICE_SERVERS"))
+	if raw == "" {
+		return []ICEServer{{URLs: "stun:stun.l.google.com:19302"}}, nil
+	}
+
+	var servers []ICEServer
+	if err := json.Unmarshal([]byte(raw), &servers); err != nil {
+		return nil, fmt.Errorf("WEBRTC_ICE_SERVERS must be a JSON array: %w", err)
+	}
+	if len(servers) == 0 {
+		return nil, fmt.Errorf("WEBRTC_ICE_SERVERS must contain at least one ICE server")
+	}
+	for i, server := range servers {
+		switch urls := server.URLs.(type) {
+		case string:
+			if strings.TrimSpace(urls) == "" {
+				return nil, fmt.Errorf("WEBRTC_ICE_SERVERS[%d].urls is required", i)
+			}
+		case []any:
+			if len(urls) == 0 {
+				return nil, fmt.Errorf("WEBRTC_ICE_SERVERS[%d].urls is required", i)
+			}
+			for j, urlValue := range urls {
+				urlString, ok := urlValue.(string)
+				if !ok || strings.TrimSpace(urlString) == "" {
+					return nil, fmt.Errorf("WEBRTC_ICE_SERVERS[%d].urls[%d] must be a non-empty string", i, j)
+				}
+			}
+		default:
+			return nil, fmt.Errorf("WEBRTC_ICE_SERVERS[%d].urls must be a string or array of strings", i)
+		}
+	}
+
+	return servers, nil
 }
 
 func loadDotEnv() error {
