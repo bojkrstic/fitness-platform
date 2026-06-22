@@ -27,6 +27,7 @@
     <p class="muted small">Admin streams video to the room. Members watch the stream and use chat for questions.</p>
     <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
+    <button id="video-fullscreen" class="button" type="button">Full screen</button>
     <div class="meta">
       <span id="video-state" class="chip">Connecting</span>
     </div>
@@ -35,9 +36,9 @@
 
 <script>
 (() => {
-  const roomID = "{{.Training.ID}}";
-  const currentUser = "{{.CurrentUser.Email}}";
-  const isAdmin = "{{.CurrentUser.Role}}" === "admin";
+  const roomID = {{json .Training.ID}};
+  const currentUser = {{json .CurrentUser.Email}};
+  const isAdmin = {{json .CurrentUser.Role}} === "admin";
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
   const chatLog = document.getElementById("chat-log");
@@ -45,6 +46,7 @@
   const chatInput = document.getElementById("chat-input");
   const localVideo = document.getElementById("local-video");
   const remoteVideo = document.getElementById("remote-video");
+  const fullscreenButton = document.getElementById("video-fullscreen");
   const stateBadge = document.getElementById("video-state");
   const iceServers = {{json .ICEServers}};
   const hasTurnServer = iceServers.some((server) => {
@@ -91,6 +93,34 @@
     } else {
       localVideo.style.display = "none";
     }
+  }
+
+  function activeVideo() {
+    return isAdmin ? localVideo : remoteVideo;
+  }
+
+  function updateFullscreenButtonLabel() {
+    fullscreenButton.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  }
+
+  async function toggleVideoFullscreen() {
+    if (typeof document.fullscreenEnabled === "boolean" && !document.fullscreenEnabled) {
+      appendMessage("System", "Your browser does not support full screen mode.", "system");
+      return;
+    }
+
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+
+    const video = activeVideo();
+    if (!video.srcObject) {
+      appendMessage("System", "Video is not ready for full screen yet.", "system");
+      return;
+    }
+
+    await video.requestFullscreen();
   }
 
   function sendSignal(targetId, signalType, data) {
@@ -268,6 +298,16 @@
     appendMessage("System", "Connection error. Refresh the room and try again.", "system");
     setState("Connection error");
   });
+
+  fullscreenButton.addEventListener("click", () => {
+    void toggleVideoFullscreen();
+  });
+
+  document.addEventListener("fullscreenchange", () => {
+    updateFullscreenButtonLabel();
+  });
+
+  updateFullscreenButtonLabel();
 
   socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
