@@ -2,7 +2,7 @@
 set -e
 
 # IMAGE="bojankrlekrstic/fitness-platform:latest"
-IMAGE="bojankrlekrstic/fitness-platform-svc:version1.0.0"
+IMAGE="bojankrlekrstic/fitness-platform-svc:version1.0.1"
 
 echo "Building Docker image: $IMAGE"
 docker build -t "$IMAGE" .
