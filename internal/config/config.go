@@ -50,7 +50,7 @@ func Load() (Config, error) {
 func loadICEServers() ([]ICEServer, error) {
 	raw := strings.TrimSpace(os.Getenv("WEBRTC_ICE_SERVERS"))
 	if raw == "" {
-		return []ICEServer{{URLs: "stun:stun.l.google.com:19302"}}, nil
+		return defaultICEServers()
 	}
 
 	var servers []ICEServer
@@ -80,6 +80,33 @@ func loadICEServers() ([]ICEServer, error) {
 			return nil, fmt.Errorf("WEBRTC_ICE_SERVERS[%d].urls must be a string or array of strings", i)
 		}
 	}
+
+	return servers, nil
+}
+
+func defaultICEServers() ([]ICEServer, error) {
+	servers := []ICEServer{{URLs: "stun:stun.l.google.com:19302"}}
+
+	turnHost := strings.TrimSpace(os.Getenv("WEBRTC_TURN_HOST"))
+	if turnHost == "" {
+		return servers, nil
+	}
+
+	turnUsername := strings.TrimSpace(os.Getenv("WEBRTC_TURN_USERNAME"))
+	turnPassword := strings.TrimSpace(os.Getenv("WEBRTC_TURN_PASSWORD"))
+	if turnUsername == "" || turnPassword == "" {
+		return nil, fmt.Errorf("WEBRTC_TURN_USERNAME and WEBRTC_TURN_PASSWORD are required when WEBRTC_TURN_HOST is set")
+	}
+
+	turnPort := envOrDefault("WEBRTC_TURN_PORT", "3478")
+	servers = append(servers, ICEServer{
+		URLs: []string{
+			fmt.Sprintf("turn:%s:%s?transport=udp", turnHost, turnPort),
+			fmt.Sprintf("turn:%s:%s?transport=tcp", turnHost, turnPort),
+		},
+		Username:   turnUsername,
+		Credential: turnPassword,
+	})
 
 	return servers, nil
 }

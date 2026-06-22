@@ -73,15 +73,22 @@ DATABASE_URL=postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable
 PORT=8080
 SEED_ADMIN_EMAIL=admin@fitness.local
 SEED_ADMIN_PASSWORD=Admin123!
-WEBRTC_ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"}]
+WEBRTC_TURN_HOST=localhost
+WEBRTC_TURN_PORT=3478
+WEBRTC_TURN_USERNAME=fitness
+WEBRTC_TURN_PASSWORD=change-this-turn-password
+WEBRTC_TURN_REALM=fitness-platform
+WEBRTC_TURN_EXTERNAL_IP=127.0.0.1
 ```
 
-Za video između različitih mreža potreban je TURN server. Tada `WEBRTC_ICE_SERVERS`
-treba da sadrži i `turn:`/`turns:` adresu:
+Za video između različitih mreža potreban je TURN server. Docker Compose podiže
+Coturn servis i aplikaciji prosleđuje TURN konfiguraciju preko `WEBRTC_TURN_*`
+varijabli.
 
-```env
-WEBRTC_ICE_SERVERS=[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turns:turn.example.com:5349","username":"turn-user","credential":"turn-password"}]
-```
+Na serveru promeni:
+- `WEBRTC_TURN_HOST` - domen ili javni IP koji browser korisnika može da dosegne.
+- `WEBRTC_TURN_EXTERNAL_IP` - javni IP servera koji Coturn oglašava u WebRTC kandidatima.
+- `WEBRTC_TURN_PASSWORD` - jaka lozinka, ne ostavljati demo vrednost.
 
 STUN često radi samo u istoj mreži ili iza jednostavnog NAT-a. TURN prosleđuje
 WebRTC media saobraćaj kada browseri ne mogu direktno da uspostave peer-to-peer
