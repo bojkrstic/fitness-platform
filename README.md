@@ -73,7 +73,26 @@ DATABASE_URL=postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable
 PORT=8080
 SEED_ADMIN_EMAIL=admin@fitness.local
 SEED_ADMIN_PASSWORD=Admin123!
+WEBRTC_TURN_HOST=localhost
+WEBRTC_TURN_PORT=3478
+WEBRTC_TURN_USERNAME=fitness
+WEBRTC_TURN_PASSWORD=change-this-turn-password
+WEBRTC_TURN_REALM=fitness-platform
+WEBRTC_TURN_EXTERNAL_IP=127.0.0.1
 ```
+
+Za video između različitih mreža potreban je TURN server. Docker Compose podiže
+Coturn servis i aplikaciji prosleđuje TURN konfiguraciju preko `WEBRTC_TURN_*`
+varijabli.
+
+Na serveru promeni:
+- `WEBRTC_TURN_HOST` - domen ili javni IP koji browser korisnika može da dosegne.
+- `WEBRTC_TURN_EXTERNAL_IP` - javni IP servera koji Coturn oglašava u WebRTC kandidatima.
+- `WEBRTC_TURN_PASSWORD` - jaka lozinka, ne ostavljati demo vrednost.
+
+STUN često radi samo u istoj mreži ili iza jednostavnog NAT-a. TURN prosleđuje
+WebRTC media saobraćaj kada browseri ne mogu direktno da uspostave peer-to-peer
+vezu.
 
 ## Komande
 
@@ -81,6 +100,110 @@ SEED_ADMIN_PASSWORD=Admin123!
 - `make up` - Docker Compose start
 - `make build` - build svih Go paketa
 - `make test` - pokretanje testova
+- `make docker-build DOCKER_IMAGE=dockerhub-user/fitness-platform DOCKER_TAG=latest` - build Docker image-a
+- `make docker-push DOCKER_IMAGE=dockerhub-user/fitness-platform DOCKER_TAG=latest` - build i push na Docker Hub
+
+## Docker Hub publish
+
+Lokalno:
+
+```bash
+docker login
+make docker-push DOCKER_IMAGE=dockerhub-user/fitness-platform DOCKER_TAG=latest
+```
+
+Preko GitHub Actions workflow-a `.github/workflows/docker-hub.yml` podesi:
+
+- secret `DOCKERHUB_USERNAME` - Docker Hub username
+- secret `DOCKERHUB_TOKEN` - Docker Hub access token
+- opciono variable `DOCKERHUB_IMAGE` - ime repozitorijuma, npr. `fitness-platform`
+
+Workflow objavljuje:
+- `latest` za push na `main`
+- git tag, npr. `v1.0.0`
+- `sha-...` tag za svaki build
+
+## Docker deploy na serveru
+
+Image koji se koristi na serveru:
+
+```text
+bojankrlekrstic/fitness-platform:version1.1.4
+```
+
+Ako prvi put podižeš aplikaciju bez `docker compose`, napravi network i PostgreSQL
+kontejner:
+
+```bash
+docker network create fitness-platform_global
+
+docker run -d \
+  --name fitness-platform-db-1 \
+  --network fitness-platform_global \
+  -e POSTGRES_DB=fitness \
+  -e POSTGRES_USER=fitness \
+  -e POSTGRES_PASSWORD=fitness \
+  -v fitness_pgdata:/var/lib/postgresql/data \
+  postgres:16-alpine
+```
+
+Kada postoji nova verzija na Docker Hub-u, na serveru:
+
+```bash
+docker ps
+```
+
+Obori prethodni app kontejner:
+
+```bash
+docker rm -f fitness-platform-app-1
+```
+
+Pokreni novu verziju:
+
+```bash
+docker run -d \
+  --name fitness-platform-app-1 \
+  --network fitness-platform_global \
+  -p 8020:8080 \
+  -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' \
+  -e PORT=8080 \
+  -e SEED_ADMIN_EMAIL='admin@fitness.local' \
+  -e SEED_ADMIN_PASSWORD='Admin123!' \
+  -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' \
+  bojankrlekrstic/fitness-platform:version1.1.4
+```
+
+Ako koristiš TURN server za video između različitih mreža, pokreni sa
+`WEBRTC_ICE_SERVERS` koji ima i `turn:`/`turns:` adresu:
+
+```bash
+docker run -d \
+  --name fitness-platform-app-1 \
+  --network fitness-platform_global \
+  -p 8020:8080 \
+  -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' \
+  -e PORT=8080 \
+  -e SEED_ADMIN_EMAIL='admin@fitness.local' \
+  -e SEED_ADMIN_PASSWORD='Admin123!' \
+  -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turns:turn.example.com:5349","username":"turn-user","credential":"turn-password"}]' \
+  bojankrlekrstic/fitness-platform:version1.1.4
+```
+
+Proveri logove:
+
+```bash
+docker logs fitness-platform-app-1 --tail=50
+```
+
+Aplikacija je tada dostupna na:
+
+```text
+http://SERVER_IP:8020
+```
+
+Za kameru preko spoljne adrese koristi HTTPS domen. Browser kamera neće raditi
+preko običnog `http://SERVER_IP`, osim na `localhost`.
 
 ## Napomene
 
@@ -91,3 +214,37 @@ SEED_ADMIN_PASSWORD=Admin123!
 - Aplikacija automatski primenjuje SQL migracije pri startu.
 - Ako koristiš `make dev` ili `./fitnes-api` lokalno, PostgreSQL mora biti dostupan na adresi iz `DATABASE_URL`.
 - Ako koristiš Docker Compose aplikaciju, otvaraj `http://localhost:8020`, jer je container port `8080` mapiran na host port `8020`.
+
+evo za dockerhub ponavljam:
+Docker hub
+  Kada se napravi nova verzija, onda se pokrene ./build-and-push.sh samo se promeni verzija v1.1.2 recimo
+  na taj nacin se formira izvrsna verzija i prebaci u dockerhub, na lokaciji https://app.docker.com/accounts/bojankrlekrstic
+  user: bojankrlekrstic
+  bitno je da se ulogujes na dockerhub preko docker login ili Docker Hub access token-a
+
+
+github je znaci za server tamo se samo nalazi kod nista drugo
+ ->  obavezno za github obrati paznju na grane, develop i main
+
+## Kratke komande za deploy fitness aplikacije
+
+```bash
+docker ps | grep fitness
+```
+
+```bash
+docker rm -f fitness-platform-app-1
+```
+
+```bash
+docker run -d --name fitness-platform-app-1 --network fitness-platform_global -p 8020:8080 -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' -e PORT=8080 -e SEED_ADMIN_EMAIL='admin@fitness.local' -e SEED_ADMIN_PASSWORD='Admin123!' -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' bojankrlekrstic/fitness-platform:version1.1.4
+```
+
+Kako se pokrece na serveru:
+pre toga se pokrene ./build-and-push.sh sa novom verzijom i onda se krene dalje, jer se ovako kreira docker hub nova verzija
+
+1. docker ps
+2. docker rm -f fitness-platform-app-1
+3. docker pull bojankrlekrstic/fitness-platform-svc:version1.0.0
+4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.0.0
+5. curl http://localhost:8020    -> ovo je test

@@ -25,7 +25,7 @@ func Run() error {
 
 	store := repository.NewPostgresStore(db)
 	svc := service.New(store, cfg)
-	httpHandler := handler.NewHttpHandler(svc)
+	httpHandler := handler.NewHttpHandler(svc, cfg)
 
 	if err := httpHandler.Init(ctx); err != nil {
 		_ = store.Close()

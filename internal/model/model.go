@@ -45,7 +45,8 @@ type TrainingsPageData struct {
 
 type TrainingRoomPageData struct {
 	BasePageData
-	Training Training
+	Training   Training
+	ICEServers any
 }
 
 type AuthPageData struct {

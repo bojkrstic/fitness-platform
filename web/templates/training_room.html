@@ -27,6 +27,7 @@
     <p class="muted small">Admin streams video to the room. Members watch the stream and use chat for questions.</p>
     <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
+    <button id="video-fullscreen" class="button" type="button">Full screen</button>
     <div class="meta">
       <span id="video-state" class="chip">Connecting</span>
     </div>
@@ -35,9 +36,9 @@
 
 <script>
 (() => {
-  const roomID = "{{.Training.ID}}";
-  const currentUser = "{{.CurrentUser.Email}}";
-  const isAdmin = "{{.CurrentUser.Role}}" === "admin";
+  const roomID = {{json .Training.ID}};
+  const currentUser = {{json .CurrentUser.Email}};
+  const isAdmin = {{json .CurrentUser.Role}} === "admin";
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
   const chatLog = document.getElementById("chat-log");
@@ -45,7 +46,13 @@
   const chatInput = document.getElementById("chat-input");
   const localVideo = document.getElementById("local-video");
   const remoteVideo = document.getElementById("remote-video");
+  const fullscreenButton = document.getElementById("video-fullscreen");
   const stateBadge = document.getElementById("video-state");
+  const iceServers = {{json .ICEServers}};
+  const hasTurnServer = iceServers.some((server) => {
+    const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
+    return urls.some((url) => typeof url === "string" && url.startsWith("turn"));
+  });
 
   let myClientId = null;
   let videoStarted = false;
@@ -53,13 +60,12 @@
   let localStream = null;
   let viewerConnection = null;
   let broadcasterId = null;
+  let missingTurnNoticeShown = false;
   const broadcasterConnections = new Map();
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
 
-  const pcConfig = {
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-  };
+  const pcConfig = { iceServers };
 
   function appendMessage(label, text, tone) {
     const wrap = document.createElement("div");
@@ -89,6 +95,34 @@
     }
   }
 
+  function activeVideo() {
+    return isAdmin ? localVideo : remoteVideo;
+  }
+
+  function updateFullscreenButtonLabel() {
+    fullscreenButton.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  }
+
+  async function toggleVideoFullscreen() {
+    if (typeof document.fullscreenEnabled === "boolean" && !document.fullscreenEnabled) {
+      appendMessage("System", "Your browser does not support full screen mode.", "system");
+      return;
+    }
+
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+
+    const video = activeVideo();
+    if (!video.srcObject) {
+      appendMessage("System", "Video is not ready for full screen yet.", "system");
+      return;
+    }
+
+    await video.requestFullscreen();
+  }
+
   function sendSignal(targetId, signalType, data) {
     if (!targetId || socket.readyState !== WebSocket.OPEN) return;
     socket.send(JSON.stringify({
@@ -115,6 +149,9 @@
     viewerConnection.onconnectionstatechange = () => {
       if (viewerConnection.connectionState === "failed") {
         setState("Video connection failed");
+        appendMessage("System", "Video could not cross the network. Configure a TURN server for external viewers.", "system");
+      } else if (viewerConnection.connectionState === "disconnected") {
+        setState("Video disconnected");
       }
     };
 
@@ -134,6 +171,9 @@
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === "failed" || pc.connectionState === "closed") {
         broadcasterConnections.delete(viewerId);
+      }
+      if (pc.connectionState === "failed") {
+        appendMessage("System", "A viewer could not connect to the video stream. Configure a TURN server for external networks.", "system");
       }
     };
     if (localStream) {
@@ -203,6 +243,10 @@
 
     if (!isAdmin) {
       setState(broadcasterId ? "Waiting for stream" : "Waiting for admin");
+      if (broadcasterId && !hasTurnServer && !missingTurnNoticeShown) {
+        missingTurnNoticeShown = true;
+        appendMessage("System", "Video between different networks needs a TURN server. Current setup has only STUN.", "system");
+      }
       return;
     }
 
@@ -254,6 +298,16 @@
     appendMessage("System", "Connection error. Refresh the room and try again.", "system");
     setState("Connection error");
   });
+
+  fullscreenButton.addEventListener("click", () => {
+    void toggleVideoFullscreen();
+  });
+
+  document.addEventListener("fullscreenchange", () => {
+    updateFullscreenButtonLabel();
+  });
+
+  updateFullscreenButtonLabel();
 
   socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
