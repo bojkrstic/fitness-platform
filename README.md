@@ -2,6 +2,10 @@
 
 Go + Gin aplikacija sa PostgreSQL bazom, auth sistemom, admin panelom, training listom i WebSocket room-ovima za chat/video signaling.
 
+Detalji za snimanje i deployment su izdvojeni u:
+- [`docs/RECORDINGS.md`](./docs/RECORDINGS.md)
+- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
+
 ## Struktura
 
 - `cmd/fitness-platform` - entrypoint aplikacije

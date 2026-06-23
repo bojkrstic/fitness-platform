@@ -15,6 +15,8 @@ Read this first when you reopen the repo with Codex.
 2. [Architecture](./ARCHITECTURE.md)
 3. [Runtime and Docker](./RUNTIME.md)
 4. [Auth and Sessions](./AUTH_AND_SESSIONS.md)
+5. [Recordings](./RECORDINGS.md)
+6. [Deployment Notes](./DEPLOYMENT.md)
 
 ## Working rules
 
@@ -22,4 +24,3 @@ Read this first when you reopen the repo with Codex.
 - HTTP rendering uses `web/templates/layout.html` plus one page template per view.
 - Sessions are in-memory, cookie-backed, and lost on process restart.
 - Database schema is created and migrated on app start from `migrations/`.
-
