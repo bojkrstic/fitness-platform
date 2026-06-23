@@ -500,7 +500,6 @@
 
   async function startAdminMedia() {
     if (videoStarted) return;
-    videoStarted = true;
 
     try {
       if (!window.isSecureContext) {
@@ -509,10 +508,12 @@
         return;
       }
 
+      videoStarted = true;
       localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
       localVideo.srcObject = localStream;
       setState("Live setup");
     } catch (err) {
+      videoStarted = false;
       appendMessage("System", "Camera access was blocked or unavailable.", "system");
       setState("Media blocked");
     }
