@@ -27,10 +27,38 @@
     <p class="muted small">Admin streams video to the room. Members watch the stream and use chat for questions.</p>
     <video id="local-video" autoplay muted playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
     <video id="remote-video" autoplay playsinline style="width:100%; background:#0f172a; border-radius:18px;"></video>
-    <button id="video-fullscreen" class="button" type="button">Full screen</button>
+    <div class="meta">
+      <button id="video-fullscreen" class="button" type="button">Full screen</button>
+      {{if eq .CurrentUser.Role "admin"}}
+        <button id="record-start" class="button" type="button" {{if not .RecordingEnabled}}disabled{{end}}>Start recording</button>
+        <button id="record-stop" class="button secondary" type="button" disabled>Stop & upload</button>
+      {{end}}
+    </div>
     <div class="meta">
       <span id="video-state" class="chip">Connecting</span>
+      <span id="record-state" class="chip">Recording idle</span>
+      <span class="chip">Storage: {{.RecordingStorageMode}}</span>
     </div>
+  </section>
+
+  <section class="card stack">
+    <div class="label">Recordings</div>
+    {{if .Recordings}}
+      <div class="stack">
+        {{range .Recordings}}
+          <div class="card" style="margin-bottom:0;">
+            <strong>{{.OriginalFilename}}</strong>
+            <div class="muted small">{{.RecordedAt}} - {{.DurationSeconds}}s</div>
+            <div class="meta">
+              <a class="button secondary" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/view" target="_blank" rel="noopener">View</a>
+              <a class="button" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/download">Download</a>
+            </div>
+          </div>
+        {{end}}
+      </div>
+    {{else}}
+      <p class="muted small">No recordings yet.</p>
+    {{end}}
   </section>
 </div>
 
@@ -39,6 +67,8 @@
   const roomID = {{json .Training.ID}};
   const currentUser = {{json .CurrentUser.Email}};
   const isAdmin = {{json .CurrentUser.Role}} === "admin";
+  const recordingEnabled = {{json .RecordingEnabled}};
+  const recordingStorageMode = {{json .RecordingStorageMode}};
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${wsScheme}://${location.host}/ws/room/${roomID}`);
   const chatLog = document.getElementById("chat-log");
@@ -47,7 +77,10 @@
   const localVideo = document.getElementById("local-video");
   const remoteVideo = document.getElementById("remote-video");
   const fullscreenButton = document.getElementById("video-fullscreen");
+  const recordStartButton = document.getElementById("record-start");
+  const recordStopButton = document.getElementById("record-stop");
   const stateBadge = document.getElementById("video-state");
+  const recordStateBadge = document.getElementById("record-state");
   const iceServers = {{json .ICEServers}};
   const hasTurnServer = iceServers.some((server) => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
@@ -61,6 +94,18 @@
   let viewerConnection = null;
   let broadcasterId = null;
   let missingTurnNoticeShown = false;
+  let mediaRecorder = null;
+  let recordingUpload = null;
+  let recordingSessionUrl = "";
+  let recordingFilename = "";
+  let recordingChunkQueue = [];
+  let recordingStartedAt = null;
+  let recordingUploadOffset = 0;
+  let recordingFinalizeRequested = false;
+  let recordingUploadInProgress = false;
+  let recordingFailed = false;
+  const recordingChunkAlignment = 256 * 1024;
+  const recordingUploadTargetSize = 8 * 1024 * 1024;
   const broadcasterConnections = new Map();
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
@@ -85,6 +130,10 @@
 
   function setState(value) {
     stateBadge.textContent = value;
+  }
+
+  function setRecordState(value) {
+    recordStateBadge.textContent = value;
   }
 
   function setupVideoLayout() {
@@ -121,6 +170,240 @@
     }
 
     await video.requestFullscreen();
+  }
+
+  function preferredRecordingMimeType() {
+    const candidates = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm",
+    ];
+    return candidates.find((candidate) => MediaRecorder.isTypeSupported(candidate)) || "";
+  }
+
+  async function startRecording() {
+    if (!isAdmin) return;
+    if (!window.MediaRecorder) {
+      appendMessage("System", "This browser does not support video recording.", "system");
+      return;
+    }
+
+    await startAdminMedia();
+    if (!localStream) {
+      appendMessage("System", "Camera stream is not available for recording.", "system");
+      return;
+    }
+
+    const mimeType = preferredRecordingMimeType();
+
+    try {
+      setRecordState("Opening upload");
+      recordingUpload = await createRecordingUpload("video/webm");
+      recordingSessionUrl = recordingUpload.uploadUrl;
+    } catch (err) {
+      console.error("Recording session failed", err);
+      appendMessage("System", `Recording upload session could not be opened. Storage mode: ${recordingStorageMode}.`, "system");
+      setRecordState("Upload setup failed");
+      recordStartButton.disabled = false;
+      return;
+    }
+
+    recordingFilename = `training-${roomID}-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+    recordingChunkQueue = [];
+    recordingUploadOffset = 0;
+    recordingFinalizeRequested = false;
+    recordingUploadInProgress = false;
+    recordingFailed = false;
+    mediaRecorder = new MediaRecorder(localStream, mimeType ? { mimeType } : undefined);
+    recordingStartedAt = Date.now();
+
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data && event.data.size > 0) {
+        recordingChunkQueue.push(event.data);
+        void processRecordingQueue();
+      }
+    });
+
+    mediaRecorder.addEventListener("stop", () => {
+      recordingFinalizeRequested = true;
+      void processRecordingQueue();
+    });
+
+    mediaRecorder.start(10000);
+    recordStartButton.disabled = true;
+    recordStopButton.disabled = false;
+    setRecordState("Recording");
+  }
+
+  function stopRecording() {
+    if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+    recordStopButton.disabled = true;
+    setRecordState("Preparing upload");
+    mediaRecorder.requestData();
+    mediaRecorder.stop();
+  }
+
+  async function createRecordingUpload(contentType) {
+    const signResponse = await fetch(`/trainings/${roomID}/recordings/sign-upload`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ contentType }),
+    });
+    if (!signResponse.ok) {
+      throw new Error(await signResponse.text());
+    }
+
+    return signResponse.json();
+  }
+
+  async function processRecordingQueue() {
+    if (recordingUploadInProgress || recordingFailed) return;
+    recordingUploadInProgress = true;
+
+    try {
+      while (true) {
+        const chunk = nextRecordingUploadChunk();
+        if (!chunk) {
+          break;
+        }
+        const isFinalChunk = recordingFinalizeRequested && recordingChunkQueue.length === 0;
+        await uploadRecordingChunk(chunk, isFinalChunk);
+        if (isFinalChunk) {
+          await completeRecordingMetadata();
+          return;
+        }
+      }
+
+      if (recordingFinalizeRequested && recordingUploadOffset === 0 && recordingChunkQueue.length === 0) {
+        appendMessage("System", "Recording is empty and was not uploaded.", "system");
+        resetRecordingState("Recording idle");
+      } else if (!recordingFinalizeRequested) {
+        setRecordState(`Recording - uploaded ${formatBytes(recordingUploadOffset)}`);
+      }
+    } catch (err) {
+      console.error("Recording upload failed", err);
+      appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
+      recordingFailed = true;
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        mediaRecorder.stop();
+      }
+      setRecordState("Upload failed");
+      recordStartButton.disabled = false;
+      recordStopButton.disabled = true;
+    } finally {
+      recordingUploadInProgress = false;
+    }
+  }
+
+  function nextRecordingUploadChunk() {
+    const queuedSize = queuedRecordingSize();
+    if (queuedSize === 0) return null;
+
+    const combined = new Blob(recordingChunkQueue, { type: "video/webm" });
+    if (recordingFinalizeRequested) {
+      recordingChunkQueue = [];
+      return combined;
+    }
+
+    if (combined.size < recordingUploadTargetSize) {
+      return null;
+    }
+
+    const uploadSize = Math.floor(combined.size / recordingChunkAlignment) * recordingChunkAlignment;
+    if (uploadSize === 0) return null;
+
+    const uploadChunk = combined.slice(0, uploadSize, "video/webm");
+    const remainder = combined.slice(uploadSize, combined.size, "video/webm");
+    recordingChunkQueue = remainder.size > 0 ? [remainder] : [];
+    return uploadChunk;
+  }
+
+  async function uploadRecordingChunk(chunk, isFinalChunk) {
+    if (!recordingSessionUrl || !recordingUpload) {
+      throw new Error("Recording upload session is not ready");
+    }
+
+    const start = recordingUploadOffset;
+    const end = start + chunk.size - 1;
+    const total = isFinalChunk ? String(end + 1) : "*";
+    setRecordState(isFinalChunk ? "Finalizing upload" : `Uploading ${formatBytes(end + 1)}`);
+
+    const response = await fetch(recordingSessionUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": recordingUpload.contentType,
+        "Content-Range": `bytes ${start}-${end}/${total}`,
+      },
+      body: chunk,
+    });
+
+    if (recordingUpload.mode === "gcs") {
+      if (isFinalChunk) {
+        if (!response.ok) {
+          throw new Error(`Final storage upload failed with status ${response.status}`);
+        }
+      } else if (response.status !== 308) {
+        throw new Error(`Storage chunk upload failed with status ${response.status}`);
+      }
+    } else if (!response.ok && response.status !== 204) {
+      throw new Error(`Storage chunk upload failed with status ${response.status}`);
+    }
+
+    recordingUploadOffset = end + 1;
+  }
+
+  async function completeRecordingMetadata() {
+    const durationSeconds = recordingStartedAt ? Math.max(1, Math.round((Date.now() - recordingStartedAt) / 1000)) : 0;
+
+    setRecordState("Saving");
+    const completeResponse = await fetch(`/trainings/${roomID}/recordings/complete`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        recordingId: recordingUpload.recordingId,
+        uploadId: recordingUpload.uploadId,
+        objectName: recordingUpload.objectName,
+        originalFilename: recordingFilename,
+        contentType: recordingUpload.contentType,
+        sizeBytes: recordingUploadOffset,
+        durationSeconds,
+      }),
+    });
+    if (!completeResponse.ok) {
+      throw new Error(await completeResponse.text());
+    }
+
+    setRecordState("Uploaded");
+    appendMessage("System", "Recording uploaded. Refreshing the room list.", "system");
+    resetRecordingState("Uploaded");
+    location.reload();
+  }
+
+  function resetRecordingState(label) {
+    mediaRecorder = null;
+    recordingUpload = null;
+    recordingSessionUrl = "";
+    recordingFilename = "";
+    recordingChunkQueue = [];
+    recordingStartedAt = null;
+    recordingUploadOffset = 0;
+    recordingFinalizeRequested = false;
+    recordingUploadInProgress = false;
+    recordingFailed = false;
+    recordStartButton.disabled = !recordingEnabled;
+    recordStopButton.disabled = true;
+    setRecordState(label);
+  }
+
+  function formatBytes(value) {
+    if (value < 1024 * 1024) {
+      return `${Math.round(value / 1024)} KB`;
+    }
+    return `${(value / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function queuedRecordingSize() {
+    return recordingChunkQueue.reduce((total, chunk) => total + chunk.size, 0);
   }
 
   function sendSignal(targetId, signalType, data) {
@@ -302,6 +585,15 @@
   fullscreenButton.addEventListener("click", () => {
     void toggleVideoFullscreen();
   });
+
+  if (recordStartButton && recordStopButton) {
+    recordStartButton.addEventListener("click", () => {
+      void startRecording();
+    });
+    recordStopButton.addEventListener("click", () => {
+      stopRecording();
+    });
+  }
 
   document.addEventListener("fullscreenchange", () => {
     updateFullscreenButtonLabel();

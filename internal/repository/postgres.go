@@ -28,6 +28,9 @@ type Store interface {
 	ListTrainings(ctx context.Context) ([]model.Training, error)
 	FindTrainingByID(ctx context.Context, id string) (model.Training, error)
 	CreateTraining(ctx context.Context, input model.TrainingForm, createdBy string) (model.Training, error)
+	ListRecordings(ctx context.Context, trainingID string) ([]model.Recording, error)
+	FindRecordingByID(ctx context.Context, id string) (model.Recording, error)
+	CreateRecording(ctx context.Context, recording model.Recording) (model.Recording, error)
 }
 
 type PostgresStore struct {
@@ -261,6 +264,104 @@ func (s *PostgresStore) CreateTraining(ctx context.Context, input model.Training
 		Time:        input.Time,
 		CreatedBy:   createdBy,
 	}, nil
+}
+
+func (s *PostgresStore) ListRecordings(ctx context.Context, trainingID string) ([]model.Recording, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
+		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by
+		 FROM training_recordings
+		 WHERE training_id = $1
+		 ORDER BY recorded_at DESC`,
+		trainingID,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list recordings: %w", err)
+	}
+	defer rows.Close()
+
+	var recordings []model.Recording
+	for rows.Next() {
+		var r model.Recording
+		if err := rows.Scan(
+			&r.ID,
+			&r.TrainingID,
+			&r.ObjectName,
+			&r.OriginalFilename,
+			&r.ContentType,
+			&r.SizeBytes,
+			&r.DurationSeconds,
+			&r.RecordedAt,
+			&r.CreatedBy,
+		); err != nil {
+			return nil, fmt.Errorf("scan recording: %w", err)
+		}
+		recordings = append(recordings, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recordings: %w", err)
+	}
+
+	return recordings, nil
+}
+
+func (s *PostgresStore) FindRecordingByID(ctx context.Context, id string) (model.Recording, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
+		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by
+		 FROM training_recordings
+		 WHERE id = $1`,
+		id,
+	)
+
+	var r model.Recording
+	if err := row.Scan(
+		&r.ID,
+		&r.TrainingID,
+		&r.ObjectName,
+		&r.OriginalFilename,
+		&r.ContentType,
+		&r.SizeBytes,
+		&r.DurationSeconds,
+		&r.RecordedAt,
+		&r.CreatedBy,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Recording{}, ErrNotFound
+		}
+		return model.Recording{}, fmt.Errorf("find recording: %w", err)
+	}
+
+	return r, nil
+}
+
+func (s *PostgresStore) CreateRecording(ctx context.Context, recording model.Recording) (model.Recording, error) {
+	if recording.ID == "" {
+		recording.ID = newID()
+	}
+
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO training_recordings
+		 (id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		 RETURNING to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"')`,
+		recording.ID,
+		recording.TrainingID,
+		recording.ObjectName,
+		recording.OriginalFilename,
+		recording.ContentType,
+		recording.SizeBytes,
+		recording.DurationSeconds,
+		recording.CreatedBy,
+	)
+	if err := row.Scan(&recording.RecordedAt); err != nil {
+		return model.Recording{}, fmt.Errorf("insert recording: %w", err)
+	}
+
+	return recording, nil
 }
 
 func newID() string {

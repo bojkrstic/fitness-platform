@@ -79,6 +79,10 @@ WEBRTC_TURN_USERNAME=fitness
 WEBRTC_TURN_PASSWORD=change-this-turn-password
 WEBRTC_TURN_REALM=fitness-platform
 WEBRTC_TURN_EXTERNAL_IP=127.0.0.1
+GCS_RECORDINGS_BUCKET=fitness-recordings-bucket
+GCS_SERVICE_ACCOUNT_EMAIL=recordings-uploader@PROJECT_ID.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+RECORDINGS_DIR=recordings
 ```
 
 Za video između različitih mreža potreban je TURN server. Docker Compose podiže
@@ -93,6 +97,59 @@ Na serveru promeni:
 STUN često radi samo u istoj mreži ili iza jednostavnog NAT-a. TURN prosleđuje
 WebRTC media saobraćaj kada browseri ne mogu direktno da uspostave peer-to-peer
 vezu.
+
+## Snimanje treninga na Google Cloud Storage
+
+Snimanje koristi browser `MediaRecorder`. Admin snima svoj lokalni video/audio
+stream, browser uploaduje `.webm` fajl direktno na Google Cloud Storage, a
+aplikacija u PostgreSQL čuva samo metadata snimka.
+
+Potrebne varijable:
+
+```env
+GCS_RECORDINGS_BUCKET=fitness-recordings-bucket
+GCS_SERVICE_ACCOUNT_EMAIL=recordings-uploader@PROJECT_ID.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Service account treba pravo da upisuje i čita objekte u bucket-u, npr.
+`Storage Object User` za konkretan bucket. Bucket treba da ostane privatan;
+aplikacija izdaje kratkotrajne signed URL linkove za upload, gledanje i
+download.
+
+Ako GCS varijable nisu podešene, aplikacija koristi lokalni storage u
+`RECORDINGS_DIR` direktorijumu. To znači da recording radi odmah i u dev
+okruženju bez dodatnog cloud setup-a.
+
+Ako koristiš GCS, browser upload chunkova zahteva CORS pravilo na bucket-u.
+Backend otvara GCS resumable session, tako da browser ne mora da cita
+`Location` header sa GCS `POST` odgovora; browser direktno radi samo `PUT`
+chunk upload.
+
+```json
+[
+  {
+    "origin": ["http://localhost:8020", "https://tvoj-domen.example"],
+    "method": ["PUT", "GET"],
+    "responseHeader": ["Content-Type", "Content-Disposition", "Content-Range", "Range"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+Primena preko `gcloud`:
+
+```bash
+gcloud storage buckets update gs://fitness-recordings-bucket --cors-file=cors.json
+```
+
+Ako je storage lokalni, CORS ti ne treba.
+
+Snimci se organizuju po datumu i treningu:
+
+```text
+recordings/YYYY/MM/DD/{training_id}/{recording_id}.webm
+```
 
 ## Komande
 

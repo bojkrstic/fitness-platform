@@ -20,6 +20,18 @@ type Training struct {
 	CreatedBy   string
 }
 
+type Recording struct {
+	ID               string
+	TrainingID       string
+	ObjectName       string
+	OriginalFilename string
+	ContentType      string
+	SizeBytes        int64
+	DurationSeconds  int
+	RecordedAt       string
+	CreatedBy        string
+}
+
 type TrainingForm struct {
 	Title       string
 	Trainer     string
@@ -45,8 +57,12 @@ type TrainingsPageData struct {
 
 type TrainingRoomPageData struct {
 	BasePageData
-	Training   Training
-	ICEServers any
+	Training          Training
+	Recordings        []Recording
+	ICEServers        any
+	RecordingEnabled  bool
+	RecordingDisabled string
+	RecordingStorageMode string
 }
 
 type AuthPageData struct {

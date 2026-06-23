@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -57,6 +58,11 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 	{
 		trainings.GET("/", h.trainingsHandler)
 		trainings.GET("/:id", h.requireAuth(), h.trainingRoomHandler)
+		trainings.POST("/:id/recordings/sign-upload", h.requireAuth(), h.requireAdmin(), h.signRecordingUploadHandler)
+		trainings.PUT("/:id/recordings/uploads/:uploadID", h.requireAuth(), h.requireAdmin(), h.uploadRecordingChunkHandler)
+		trainings.POST("/:id/recordings/complete", h.requireAuth(), h.requireAdmin(), h.completeRecordingHandler)
+		trainings.GET("/:id/recordings/:recordingID/view", h.requireAuth(), h.recordingAccessHandler(false))
+		trainings.GET("/:id/recordings/:recordingID/download", h.requireAuth(), h.recordingAccessHandler(true))
 	}
 
 	admin := router.Group("/admin", h.requireAuth(), h.requireAdmin())
@@ -222,11 +228,143 @@ func (h *HttpHandler) trainingRoomHandler(c *gin.Context) {
 		return
 	}
 
+	recordings, err := h.svc.Recordings(c.Request.Context(), id)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	h.renderPage(c, http.StatusOK, "training_room", model.TrainingRoomPageData{
-		BasePageData: model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
-		Training:     training,
-		ICEServers:   h.cfg.WebRTCICEServers,
+		BasePageData:         model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
+		Training:             training,
+		Recordings:           recordings,
+		ICEServers:           h.cfg.WebRTCICEServers,
+		RecordingEnabled:     h.svc.RecordingStorageEnabled(),
+		RecordingDisabled:    h.svc.RecordingStorageDisabledReason(),
+		RecordingStorageMode: h.svc.RecordingStorageModeLabel(),
 	})
+}
+
+func (h *HttpHandler) signRecordingUploadHandler(c *gin.Context) {
+	var input struct {
+		ContentType string `json:"contentType"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	upload, err := h.svc.SignRecordingUpload(c.Request.Context(), c.Param("id"), input.ContentType)
+	if err != nil {
+		if errors.Is(err, service.ErrStorageDisabled) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": h.svc.RecordingStorageDisabledReason()})
+			return
+		}
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "training not found"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, upload)
+}
+
+func (h *HttpHandler) completeRecordingHandler(c *gin.Context) {
+	var input struct {
+		RecordingID      string `json:"recordingId"`
+		UploadID         string `json:"uploadId"`
+		ObjectName       string `json:"objectName"`
+		OriginalFilename string `json:"originalFilename"`
+		ContentType      string `json:"contentType"`
+		SizeBytes        int64  `json:"sizeBytes"`
+		DurationSeconds  int    `json:"durationSeconds"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	user := h.mustCurrentUser(c)
+	recording, err := h.svc.CompleteRecording(c.Request.Context(), model.Recording{
+		ID:               strings.TrimSpace(input.RecordingID),
+		TrainingID:       c.Param("id"),
+		ObjectName:       strings.TrimSpace(input.ObjectName),
+		OriginalFilename: strings.TrimSpace(input.OriginalFilename),
+		ContentType:      strings.TrimSpace(input.ContentType),
+		SizeBytes:        input.SizeBytes,
+		DurationSeconds:  input.DurationSeconds,
+		CreatedBy:        user.ID,
+	})
+	if err != nil {
+		if errors.Is(err, service.ErrStorageDisabled) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": h.svc.RecordingStorageDisabledReason()})
+			return
+		}
+		if errors.Is(err, repository.ErrNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "training not found"})
+			return
+		}
+		if errors.Is(err, service.ErrInvalidRecording) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid recording"})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusCreated, recording)
+}
+
+func (h *HttpHandler) uploadRecordingChunkHandler(c *gin.Context) {
+	user := h.mustCurrentUser(c)
+	if user == nil {
+		c.String(http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := h.svc.UploadLocalRecordingChunk(c.Param("id"), c.Param("uploadID"), c.GetHeader("Content-Range"), body); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+func (h *HttpHandler) recordingAccessHandler(download bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		access, err := h.svc.RecordingAccess(c.Request.Context(), c.Param("id"), c.Param("recordingID"), download)
+		if err != nil {
+			if errors.Is(err, repository.ErrNotFound) {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			c.String(http.StatusInternalServerError, err.Error())
+			return
+		}
+
+		if access.Mode == "local" {
+			if download {
+				c.FileAttachment(access.FilePath, access.Recording.OriginalFilename)
+				return
+			}
+			c.File(access.FilePath)
+			return
+		}
+
+		c.Redirect(http.StatusTemporaryRedirect, access.AccessURL)
+	}
 }
 
 func (h *HttpHandler) loginFormHandler(c *gin.Context) {

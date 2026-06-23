@@ -34,8 +34,14 @@ services:
       WEBRTC_TURN_PORT: ${WEBRTC_TURN_PORT:-3478}
       WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME:-fitness}
       WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD:-change-this-turn-password}
+      GCS_RECORDINGS_BUCKET: ${GCS_RECORDINGS_BUCKET:-}
+      GCS_SERVICE_ACCOUNT_EMAIL: ${GCS_SERVICE_ACCOUNT_EMAIL:-}
+      GCS_PRIVATE_KEY: ${GCS_PRIVATE_KEY:-}
+      RECORDINGS_DIR: /app/recordings
     ports:
       - "8020:8080"
+    volumes:
+      - fitness_recordings:/app/recordings
 
   turn:
     image: coturn/coturn:4.6-alpine
@@ -67,3 +73,4 @@ services:
 
 volumes:
   fitness_pgdata:
+  fitness_recordings:
