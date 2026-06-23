@@ -2,7 +2,7 @@
 set -e
 
 IMAGE="${DOCKER_IMAGE:-bojankrlekrstic/fitness-platform-svc}"
-TAG="${DOCKER_TAG:-version1.0.3}"
+TAG="${DOCKER_TAG:-version1.0.4}"
 FULL_IMAGE="${IMAGE}:${TAG}"
 
 echo "Building Docker image: $FULL_IMAGE"
