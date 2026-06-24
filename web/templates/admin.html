@@ -29,21 +29,40 @@
     </form>
   </section>
 
-  <section class="card stack">
-    <div class="label">Existing trainings</div>
-    {{range .Trainings}}
-      <article class="card" style="margin-bottom:0;">
+  <div class="stack">
+    <section class="card stack">
+      <div class="label">Subscription pricing</div>
+      {{if .BillingEnabled}}
+        <p class="muted">Current checkout is backed by a Stripe subscription price.</p>
         <div class="meta">
-          <span class="chip">{{.Time}}</span>
-          <span>{{.Trainer}}</span>
+          <span class="chip">Stripe price: {{.StripePriceID}}</span>
         </div>
-        <h2>{{.Title}}</h2>
-        <p class="muted">{{.Description}}</p>
-        <p><a href="/trainings/{{.ID}}">Open room</a></p>
-      </article>
-    {{else}}
-      <p class="muted">No trainings yet.</p>
-    {{end}}
-  </section>
+        <p class="muted small">
+          Create or update the Stripe Product/Price in the Stripe Dashboard, then replace the active `STRIPE_PRICE_ID` in production.
+        </p>
+        <p><a class="button secondary" href="/billing">Open billing</a></p>
+      {{else}}
+        <p class="error">{{.BillingDisabledReason}}</p>
+        <p class="muted small">Set the Stripe env vars to enable subscription checkout.</p>
+      {{end}}
+    </section>
+
+    <section class="card stack">
+      <div class="label">Existing trainings</div>
+      {{range .Trainings}}
+        <article class="card" style="margin-bottom:0;">
+          <div class="meta">
+            <span class="chip">{{.Time}}</span>
+            <span>{{.Trainer}}</span>
+          </div>
+          <h2>{{.Title}}</h2>
+          <p class="muted">{{.Description}}</p>
+          <p><a href="/trainings/{{.ID}}">Open room</a></p>
+        </article>
+      {{else}}
+        <p class="muted">No trainings yet.</p>
+      {{end}}
+    </section>
+  </div>
 </div>
 {{end}}

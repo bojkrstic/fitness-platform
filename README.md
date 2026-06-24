@@ -197,7 +197,7 @@ Workflow objavljuje:
 Image koji se koristi na serveru:
 
 ```text
-bojankrlekrstic/fitness-platform:version1.1.4
+bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Ako prvi put podižeš aplikaciju bez `docker compose`, napravi network i PostgreSQL
@@ -240,7 +240,7 @@ docker run -d \
   -e SEED_ADMIN_EMAIL='admin@fitness.local' \
   -e SEED_ADMIN_PASSWORD='Admin123!' \
   -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' \
-  bojankrlekrstic/fitness-platform:version1.1.4
+  bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Ako koristiš TURN server za video između različitih mreža, pokreni sa
@@ -256,7 +256,7 @@ docker run -d \
   -e SEED_ADMIN_EMAIL='admin@fitness.local' \
   -e SEED_ADMIN_PASSWORD='Admin123!' \
   -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turns:turn.example.com:5349","username":"turn-user","credential":"turn-password"}]' \
-  bojankrlekrstic/fitness-platform:version1.1.4
+  bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Proveri logove:
@@ -306,7 +306,7 @@ docker rm -f fitness-platform-app-1
 ```
 
 ```bash
-docker run -d --name fitness-platform-app-1 --network fitness-platform_global -p 8020:8080 -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' -e PORT=8080 -e SEED_ADMIN_EMAIL='admin@fitness.local' -e SEED_ADMIN_PASSWORD='Admin123!' -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' bojankrlekrstic/fitness-platform:version1.1.4
+docker run -d --name fitness-platform-app-1 --network fitness-platform_global -p 8020:8080 -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' -e PORT=8080 -e SEED_ADMIN_EMAIL='admin@fitness.local' -e SEED_ADMIN_PASSWORD='Admin123!' -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Kako se pokrece na serveru:
@@ -314,6 +314,6 @@ pre toga se pokrene ./build-and-push.sh sa novom verzijom i onda se krene dalje,
 
 1. docker ps
 2. docker rm -f fitness-platform-app-1
-3. docker pull bojankrlekrstic/fitness-platform-svc:version1.0.0
-4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.0.0
+3. docker pull bojankrlekrstic/fitness-platform-svc:version1.1.5
+4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.1.5
 5. curl http://localhost:8020    -> ovo je test
