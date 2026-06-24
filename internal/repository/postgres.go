@@ -31,6 +31,13 @@ type Store interface {
 	ListRecordings(ctx context.Context, trainingID string) ([]model.Recording, error)
 	FindRecordingByID(ctx context.Context, id string) (model.Recording, error)
 	CreateRecording(ctx context.Context, recording model.Recording) (model.Recording, error)
+	UpsertBillingCustomer(ctx context.Context, userID, stripeCustomerID string) error
+	FindBillingCustomerByUserID(ctx context.Context, userID string) (model.BillingCustomer, error)
+	FindUserIDByBillingCustomerID(ctx context.Context, stripeCustomerID string) (string, error)
+	UpsertSubscription(ctx context.Context, sub model.Subscription) (model.Subscription, error)
+	FindSubscriptionByUserID(ctx context.Context, userID string) (model.Subscription, error)
+	FindUserByStripeSubscriptionID(ctx context.Context, stripeSubscriptionID string) (string, error)
+	MarkStripeWebhookEvent(ctx context.Context, eventID, eventType string) (bool, error)
 }
 
 type PostgresStore struct {
@@ -362,6 +369,190 @@ func (s *PostgresStore) CreateRecording(ctx context.Context, recording model.Rec
 	}
 
 	return recording, nil
+}
+
+func (s *PostgresStore) UpsertBillingCustomer(ctx context.Context, userID, stripeCustomerID string) error {
+	_, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO billing_customers (user_id, stripe_customer_id)
+		 VALUES ($1, $2)
+		 ON CONFLICT (user_id) DO UPDATE
+		 SET stripe_customer_id = EXCLUDED.stripe_customer_id,
+		     updated_at = NOW()`,
+		userID, stripeCustomerID,
+	)
+	if err != nil {
+		return fmt.Errorf("upsert billing customer: %w", err)
+	}
+	return nil
+}
+
+func (s *PostgresStore) FindBillingCustomerByUserID(ctx context.Context, userID string) (model.BillingCustomer, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT user_id, stripe_customer_id,
+		        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		        to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"')
+		 FROM billing_customers
+		 WHERE user_id = $1`,
+		userID,
+	)
+
+	var customer model.BillingCustomer
+	if err := row.Scan(&customer.UserID, &customer.StripeCustomerID, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.BillingCustomer{}, ErrNotFound
+		}
+		return model.BillingCustomer{}, fmt.Errorf("find billing customer: %w", err)
+	}
+
+	return customer, nil
+}
+
+func (s *PostgresStore) FindUserIDByBillingCustomerID(ctx context.Context, stripeCustomerID string) (string, error) {
+	var userID string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT user_id FROM billing_customers WHERE stripe_customer_id = $1`,
+		stripeCustomerID,
+	).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("find user by billing customer: %w", err)
+	}
+
+	return userID, nil
+}
+
+func (s *PostgresStore) UpsertSubscription(ctx context.Context, sub model.Subscription) (model.Subscription, error) {
+	if sub.ID == "" {
+		sub.ID = newID()
+	}
+
+	row := s.db.QueryRowContext(
+		ctx,
+		`INSERT INTO user_subscriptions
+		 (id, user_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status,
+		  current_period_start, current_period_end, cancel_at_period_end)
+		 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, '')::timestamptz, NULLIF($8, '')::timestamptz, $9)
+		 ON CONFLICT (user_id) DO UPDATE
+		 SET stripe_customer_id = EXCLUDED.stripe_customer_id,
+		     stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+		     stripe_price_id = EXCLUDED.stripe_price_id,
+		     status = EXCLUDED.status,
+		     current_period_start = EXCLUDED.current_period_start,
+		     current_period_end = EXCLUDED.current_period_end,
+		     cancel_at_period_end = EXCLUDED.cancel_at_period_end,
+		     updated_at = NOW()
+		 RETURNING id, user_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status,
+		           to_char(current_period_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		           to_char(current_period_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		           cancel_at_period_end,
+		           to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		           to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"')`,
+		sub.ID,
+		sub.UserID,
+		sub.StripeCustomerID,
+		sub.StripeSubscriptionID,
+		sub.StripePriceID,
+		sub.Status,
+		sub.CurrentPeriodStart,
+		sub.CurrentPeriodEnd,
+		sub.CancelAtPeriodEnd,
+	)
+	if err := row.Scan(
+		&sub.ID,
+		&sub.UserID,
+		&sub.StripeCustomerID,
+		&sub.StripeSubscriptionID,
+		&sub.StripePriceID,
+		&sub.Status,
+		&sub.CurrentPeriodStart,
+		&sub.CurrentPeriodEnd,
+		&sub.CancelAtPeriodEnd,
+		&sub.CreatedAt,
+		&sub.UpdatedAt,
+	); err != nil {
+		return model.Subscription{}, fmt.Errorf("upsert subscription: %w", err)
+	}
+
+	return sub, nil
+}
+
+func (s *PostgresStore) FindSubscriptionByUserID(ctx context.Context, userID string) (model.Subscription, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`SELECT id, user_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status,
+		        to_char(current_period_start AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		        to_char(current_period_end AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		        cancel_at_period_end,
+		        to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'),
+		        to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"')
+		 FROM user_subscriptions
+		 WHERE user_id = $1`,
+		userID,
+	)
+
+	var sub model.Subscription
+	if err := row.Scan(
+		&sub.ID,
+		&sub.UserID,
+		&sub.StripeCustomerID,
+		&sub.StripeSubscriptionID,
+		&sub.StripePriceID,
+		&sub.Status,
+		&sub.CurrentPeriodStart,
+		&sub.CurrentPeriodEnd,
+		&sub.CancelAtPeriodEnd,
+		&sub.CreatedAt,
+		&sub.UpdatedAt,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Subscription{}, ErrNotFound
+		}
+		return model.Subscription{}, fmt.Errorf("find subscription: %w", err)
+	}
+
+	return sub, nil
+}
+
+func (s *PostgresStore) FindUserByStripeSubscriptionID(ctx context.Context, stripeSubscriptionID string) (string, error) {
+	var userID string
+	err := s.db.QueryRowContext(
+		ctx,
+		`SELECT user_id FROM user_subscriptions WHERE stripe_subscription_id = $1`,
+		stripeSubscriptionID,
+	).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", ErrNotFound
+		}
+		return "", fmt.Errorf("find user by subscription id: %w", err)
+	}
+
+	return userID, nil
+}
+
+func (s *PostgresStore) MarkStripeWebhookEvent(ctx context.Context, eventID, eventType string) (bool, error) {
+	result, err := s.db.ExecContext(
+		ctx,
+		`INSERT INTO stripe_webhook_events (event_id, event_type)
+		 VALUES ($1, $2)
+		 ON CONFLICT (event_id) DO NOTHING`,
+		eventID, eventType,
+	)
+	if err != nil {
+		return false, fmt.Errorf("mark webhook event: %w", err)
+	}
+
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("mark webhook event rows affected: %w", err)
+	}
+
+	return affected > 0, nil
 }
 
 func newID() string {

@@ -15,6 +15,7 @@ type Config struct {
 	SeedAdminPassword string
 	WebRTCICEServers  []ICEServer
 	RecordingStorage  RecordingStorage
+	Billing           Billing
 }
 
 type ICEServer struct {
@@ -28,6 +29,13 @@ type RecordingStorage struct {
 	ServiceAccountEmail string
 	PrivateKey          string
 	LocalDir            string
+}
+
+type Billing struct {
+	AppBaseURL          string
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	StripePriceID       string
 }
 
 func (s RecordingStorage) Enabled() bool {
@@ -66,6 +74,12 @@ func Load() (Config, error) {
 			ServiceAccountEmail: strings.TrimSpace(os.Getenv("GCS_SERVICE_ACCOUNT_EMAIL")),
 			PrivateKey:          normalizePrivateKey(os.Getenv("GCS_PRIVATE_KEY")),
 			LocalDir:            envOrDefault("RECORDINGS_DIR", "recordings"),
+		},
+		Billing: Billing{
+			AppBaseURL:          strings.TrimSpace(os.Getenv("APP_BASE_URL")),
+			StripeSecretKey:     strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
+			StripeWebhookSecret: strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+			StripePriceID:       strings.TrimSpace(os.Getenv("STRIPE_PRICE_ID")),
 		},
 	}
 

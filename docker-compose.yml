@@ -27,6 +27,7 @@ services:
     environment:
       DATABASE_URL: postgres://fitness:fitness@db:5432/fitness?sslmode=disable
       PORT: 8080
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:8020}
       SEED_ADMIN_EMAIL: admin@fitness.local
       SEED_ADMIN_PASSWORD: Admin123!
       WEBRTC_ICE_SERVERS: ${WEBRTC_ICE_SERVERS:-}
@@ -34,6 +35,9 @@ services:
       WEBRTC_TURN_PORT: ${WEBRTC_TURN_PORT:-3478}
       WEBRTC_TURN_USERNAME: ${WEBRTC_TURN_USERNAME:-fitness}
       WEBRTC_TURN_PASSWORD: ${WEBRTC_TURN_PASSWORD:-change-this-turn-password}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY:-}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET:-}
+      STRIPE_PRICE_ID: ${STRIPE_PRICE_ID:-}
       GCS_RECORDINGS_BUCKET: ${GCS_RECORDINGS_BUCKET:-}
       GCS_SERVICE_ACCOUNT_EMAIL: ${GCS_SERVICE_ACCOUNT_EMAIL:-}
       GCS_PRIVATE_KEY: ${GCS_PRIVATE_KEY:-}

@@ -66,6 +66,10 @@
       color: white;
       border-color: var(--text);
     }
+    .button.secondary {
+      background: transparent;
+      color: var(--text);
+    }
     main { padding: 16px 0 44px; }
     .grid {
       display: grid;
@@ -161,6 +165,7 @@
     <nav>
       <a href="/">Home</a> · <a href="/trainings">Trainings</a>
       {{if .CurrentUser}}
+        <a href="/billing">Billing</a>
         {{if eq .CurrentUser.Role "admin"}}
           <a href="/admin">Admin</a>
         {{end}}

@@ -8,6 +8,7 @@ Fitnes Platform is a small Go web app for:
 - admin-only training creation
 - browsing training list and room pages
 - websocket room signaling for chat/video
+- Stripe-backed subscription billing for member access
 
 ## Tech stack
 
@@ -36,4 +37,4 @@ Fitnes Platform is a small Go web app for:
 - Default trainings are inserted if the database is empty.
 - Sessions are stored in memory and keyed by cookie.
 - Template rendering is split per page to avoid template collision.
-
+- Subscription access is stored in PostgreSQL and synced from Stripe webhooks.

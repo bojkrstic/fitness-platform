@@ -65,6 +65,16 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 		trainings.GET("/:id/recordings/:recordingID/download", h.requireAuth(), h.recordingAccessHandler(true))
 	}
 
+	billing := router.Group("/billing", h.requireAuth())
+	{
+		billing.GET("/", h.billingPageHandler)
+		billing.POST("/checkout", h.billingCheckoutHandler)
+		billing.POST("/portal", h.billingPortalHandler)
+		billing.GET("/complete", h.billingCompleteHandler)
+	}
+
+	router.POST("/webhooks/stripe", h.stripeWebhookHandler)
+
 	admin := router.Group("/admin", h.requireAuth(), h.requireAdmin())
 	{
 		admin.GET("/", h.adminDashboardHandler)
@@ -85,6 +95,7 @@ func mustLoadTemplates() map[string]*template.Template {
 		"login":         "web/templates/login.html",
 		"register":      "web/templates/register.html",
 		"admin":         "web/templates/admin.html",
+		"billing":       "web/templates/billing.html",
 		"training_room": "web/templates/training_room.html",
 	}
 
@@ -197,9 +208,16 @@ func (h *HttpHandler) homeHandler(c *gin.Context) {
 		return
 	}
 
+	canAccess, _, err := h.userAccess(c)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	h.renderPage(c, http.StatusOK, "index", model.HomePageData{
 		BasePageData: model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
 		Trainings:    trainings,
+		CanAccess:    canAccess,
 	})
 }
 
@@ -210,9 +228,16 @@ func (h *HttpHandler) trainingsHandler(c *gin.Context) {
 		return
 	}
 
+	canAccess, _, err := h.userAccess(c)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
 	h.renderPage(c, http.StatusOK, "trainings", model.TrainingsPageData{
 		BasePageData: model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
 		Trainings:    trainings,
+		CanAccess:    canAccess,
 	})
 }
 
@@ -228,21 +253,45 @@ func (h *HttpHandler) trainingRoomHandler(c *gin.Context) {
 		return
 	}
 
-	recordings, err := h.svc.Recordings(c.Request.Context(), id)
+	canAccess, subscription, err := h.userAccess(c)
 	if err != nil {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	h.renderPage(c, http.StatusOK, "training_room", model.TrainingRoomPageData{
-		BasePageData:         model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
-		Training:             training,
-		Recordings:           recordings,
-		ICEServers:           h.cfg.WebRTCICEServers,
-		RecordingEnabled:     h.svc.RecordingStorageEnabled(),
-		RecordingDisabled:    h.svc.RecordingStorageDisabledReason(),
-		RecordingStorageMode: h.svc.RecordingStorageModeLabel(),
-	})
+	data := model.TrainingRoomPageData{
+		BasePageData:          model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
+		Training:              training,
+		ICEServers:            h.cfg.WebRTCICEServers,
+		RecordingEnabled:      h.svc.RecordingStorageEnabled(),
+		RecordingDisabled:     h.svc.RecordingStorageDisabledReason(),
+		RecordingStorageMode:  h.svc.RecordingStorageModeLabel(),
+		CanAccess:             canAccess,
+		BillingEnabled:        h.svc.BillingEnabled(),
+		BillingDisabledReason: h.svc.BillingDisabledReason(),
+		Subscription:          subscription,
+		ReturnTo:              "/trainings/" + id,
+	}
+
+	if canAccess {
+		recordings, err := h.svc.Recordings(c.Request.Context(), id)
+		if err != nil {
+			c.String(http.StatusInternalServerError, err.Error())
+			return
+		}
+		data.Recordings = recordings
+	}
+
+	if msg := strings.TrimSpace(c.Query("billing")); msg != "" {
+		switch msg {
+		case "success":
+			data.SuccessMessage = "Pretplata je aktivirana."
+		case "canceled":
+			data.BillingDisabledReason = "Checkout je otkazan."
+		}
+	}
+
+	h.renderPage(c, http.StatusOK, "training_room", data)
 }
 
 func (h *HttpHandler) signRecordingUploadHandler(c *gin.Context) {
@@ -344,6 +393,23 @@ func (h *HttpHandler) uploadRecordingChunkHandler(c *gin.Context) {
 
 func (h *HttpHandler) recordingAccessHandler(download bool) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		user := h.mustCurrentUser(c)
+		if user == nil {
+			c.String(http.StatusUnauthorized, "unauthorized")
+			return
+		}
+		if user.Role != "admin" {
+			canAccess, _, err := h.userAccess(c)
+			if err != nil {
+				c.String(http.StatusInternalServerError, err.Error())
+				return
+			}
+			if !canAccess {
+				c.Status(http.StatusForbidden)
+				return
+			}
+		}
+
 		access, err := h.svc.RecordingAccess(c.Request.Context(), c.Param("id"), c.Param("recordingID"), download)
 		if err != nil {
 			if errors.Is(err, repository.ErrNotFound) {
@@ -488,7 +554,10 @@ func (h *HttpHandler) adminDashboardHandler(c *gin.Context) {
 			CurrentUser: h.mustCurrentUser(c),
 			Success:     map[string]string{"1": "Trening je kreiran."}[c.Query("created")],
 		},
-		Trainings: trainings,
+		Trainings:             trainings,
+		BillingEnabled:        h.svc.BillingEnabled(),
+		BillingDisabledReason: h.svc.BillingDisabledReason(),
+		StripePriceID:         h.cfg.Billing.StripePriceID,
 	})
 }
 
@@ -542,6 +611,152 @@ func safeNext(next string) string {
 	return next
 }
 
+func safeReturnPath(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "/billing"
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.IsAbs() || !strings.HasPrefix(value, "/") {
+		return "/billing"
+	}
+	return value
+}
+
+func (h *HttpHandler) userAccess(c *gin.Context) (bool, *model.Subscription, error) {
+	user := h.mustCurrentUser(c)
+	return h.svc.UserCanAccess(c.Request.Context(), user)
+}
+
+func (h *HttpHandler) billingPageHandler(c *gin.Context) {
+	user := h.mustCurrentUser(c)
+	canAccess, subscription, err := h.userAccess(c)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	data := model.BillingPageData{
+		BasePageData:          model.BasePageData{CurrentUser: h.mustCurrentUser(c)},
+		BillingEnabled:        h.svc.BillingEnabled(),
+		BillingDisabledReason: h.svc.BillingDisabledReason(),
+		Subscription:          subscription,
+		ReturnTo:              "/billing",
+	}
+	if h.svc.BillingEnabled() && canAccess && user != nil && user.Role != "admin" && subscription != nil {
+		data.Success = "Pretplata je aktivna."
+	}
+	if msg := strings.TrimSpace(c.Query("billing")); msg != "" {
+		switch msg {
+		case "success":
+			data.Success = "Pretplata je aktivirana."
+		case "canceled":
+			data.Error = "Checkout je otkazan."
+		case "missing":
+			data.Error = "Nema spremljenog billing naloga. Pokreni checkout prvo."
+		}
+	}
+
+	h.renderPage(c, http.StatusOK, "billing", data)
+}
+
+func (h *HttpHandler) billingCheckoutHandler(c *gin.Context) {
+	user := h.mustCurrentUser(c)
+	if user == nil {
+		c.String(http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	canAccess, _, err := h.userAccess(c)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if canAccess && user.Role != "admin" {
+		c.Redirect(http.StatusSeeOther, "/billing")
+		return
+	}
+
+	returnTo := safeReturnPath(c.PostForm("return_to"))
+	url, err := h.svc.CreateCheckoutSession(c.Request.Context(), user, returnTo)
+	if err != nil {
+		if errors.Is(err, service.ErrStorageDisabled) {
+			c.String(http.StatusServiceUnavailable, h.svc.BillingDisabledReason())
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, url)
+}
+
+func (h *HttpHandler) billingPortalHandler(c *gin.Context) {
+	user := h.mustCurrentUser(c)
+	if user == nil {
+		c.String(http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	returnTo := safeReturnPath(c.PostForm("return_to"))
+	url, err := h.svc.CreateBillingPortalSession(c.Request.Context(), user, returnTo)
+	if err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Redirect(http.StatusSeeOther, "/billing?billing=missing")
+			return
+		}
+		if errors.Is(err, service.ErrStorageDisabled) {
+			c.String(http.StatusServiceUnavailable, h.svc.BillingDisabledReason())
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, url)
+}
+
+func (h *HttpHandler) billingCompleteHandler(c *gin.Context) {
+	sessionID := strings.TrimSpace(c.Query("session_id"))
+	if sessionID == "" {
+		c.String(http.StatusBadRequest, "session_id is required")
+		return
+	}
+
+	returnTo := safeReturnPath(c.Query("return_to"))
+	if err := h.svc.FinalizeCheckoutSession(c.Request.Context(), sessionID); err != nil {
+		if errors.Is(err, service.ErrStorageDisabled) {
+			c.String(http.StatusServiceUnavailable, h.svc.BillingDisabledReason())
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	target := returnTo
+	if strings.Contains(target, "?") {
+		target += "&billing=success"
+	} else {
+		target += "?billing=success"
+	}
+	c.Redirect(http.StatusSeeOther, target)
+}
+
+func (h *HttpHandler) stripeWebhookHandler(c *gin.Context) {
+	body, err := io.ReadAll(c.Request.Body)
+	if err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if err := h.svc.HandleStripeWebhook(c.Request.Context(), body, c.GetHeader("Stripe-Signature")); err != nil {
+		c.String(http.StatusBadRequest, err.Error())
+		return
+	}
+
+	c.Status(http.StatusOK)
+}
+
 func (h *HttpHandler) roomSocketHandler(c *gin.Context) {
 	user := h.mustCurrentUser(c)
 	if user == nil {
@@ -556,6 +771,16 @@ func (h *HttpHandler) roomSocketHandler(c *gin.Context) {
 			return
 		}
 		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	canAccess, _, err := h.userAccess(c)
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !canAccess && user.Role != "admin" {
+		c.Status(http.StatusForbidden)
 		return
 	}
 

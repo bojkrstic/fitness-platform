@@ -7,8 +7,10 @@
     <span>Trainer: {{.Training.Trainer}}</span>
   </div>
   <p class="muted">{{.Training.Description}}</p>
+  {{if .SuccessMessage}}<div class="notice">{{.SuccessMessage}}</div>{{end}}
 </section>
 
+{{if .CanAccess}}
 <div class="split">
   <section class="card stack">
     <div class="label">Chat</div>
@@ -695,4 +697,28 @@
   });
 })();
 </script>
+{{else}}
+<section class="card stack">
+  <div class="label">Subscription required</div>
+  <h2>Unlock this training and its recordings</h2>
+  <p class="muted">
+    This room is available only to users with an active subscription. Once you subscribe, you will be redirected back here automatically.
+  </p>
+  {{if .Subscription}}
+    <div class="meta">
+      <span class="chip">Status: {{.Subscription.Status}}</span>
+      {{if .Subscription.CurrentPeriodEnd}}<span class="chip">Until: {{.Subscription.CurrentPeriodEnd}}</span>{{end}}
+    </div>
+  {{end}}
+  {{if .BillingEnabled}}
+    <form method="post" action="/billing/checkout">
+      <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+      <button class="button" type="submit">Subscribe with card</button>
+    </form>
+    <a class="button secondary" href="/billing">Open billing</a>
+  {{else}}
+    <p class="error">{{.BillingDisabledReason}}</p>
+  {{end}}
+</section>
+{{end}}
 {{end}}

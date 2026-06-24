@@ -11,6 +11,7 @@ The project uses a simple layered structure:
 5. `internal/repository` owns PostgreSQL access and migrations.
 6. `internal/session` owns auth cookies and in-memory session data.
 7. `internal/room` owns websocket rooms and message fanout.
+8. `internal/service` also owns Stripe subscription sync and access checks.
 
 ## Request flow
 
@@ -26,6 +27,7 @@ The project uses a simple layered structure:
 - `database/sql` is opened through `repository.OpenDatabase()`.
 - `repository.Init()` applies SQL files from `migrations/` in lexical order.
 - `service.Init()` seeds admin and default trainings.
+- Stripe webhooks update billing customer and subscription rows in PostgreSQL.
 - `handler.NewHttpHandler()` prepares routes and template sets.
 
 ## Realtime flow
@@ -34,4 +36,3 @@ The project uses a simple layered structure:
 - Room membership is tracked in memory in `internal/room`.
 - Participants and history are broadcast when a user joins.
 - Chat and signaling messages are relayed through the room hub.
-

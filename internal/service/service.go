@@ -14,12 +14,12 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"sort"
-	"os"
-	"sync"
 	"strings"
+	"sync"
 	"time"
 
 	"fitnes-platform/internal/config"
@@ -45,6 +45,7 @@ type Service struct {
 	seedAdminEmail    string
 	seedAdminPassword string
 	recordingStorage  config.RecordingStorage
+	billing           config.Billing
 	localUploads      map[string]*localRecordingUpload
 	localUploadsMu    sync.Mutex
 }
@@ -55,6 +56,7 @@ func New(store repository.Store, cfg config.Config) *Service {
 		seedAdminEmail:    cfg.SeedAdminEmail,
 		seedAdminPassword: cfg.SeedAdminPassword,
 		recordingStorage:  cfg.RecordingStorage,
+		billing:           cfg.Billing,
 		localUploads:      map[string]*localRecordingUpload{},
 	}
 }
@@ -77,13 +79,13 @@ type RecordingAccess struct {
 }
 
 type localRecordingUpload struct {
-	uploadID   string
-	trainingID string
+	uploadID    string
+	trainingID  string
 	recordingID string
-	objectName string
-	filePath   string
+	objectName  string
+	filePath    string
 	contentType string
-	sizeBytes  int64
+	sizeBytes   int64
 }
 
 func (s *Service) Init(ctx context.Context) error {

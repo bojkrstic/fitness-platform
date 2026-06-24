@@ -10,6 +10,10 @@
     {{if .CurrentUser}}
       {{if eq .CurrentUser.Role "admin"}}
         <a class="nav-link" href="/admin">Open admin</a>
+      {{else if .CanAccess}}
+        <a class="nav-link" href="/billing">Subscription active</a>
+      {{else}}
+        <a class="nav-link" href="/billing">Subscribe</a>
       {{end}}
     {{else}}
       <a class="nav-link" href="/auth/login">Login</a>

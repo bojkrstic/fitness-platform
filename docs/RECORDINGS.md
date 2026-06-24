@@ -6,6 +6,7 @@
 - Recordings are listed on the same training page with `View` and `Download`.
 - Metadata is stored in PostgreSQL.
 - The video file is stored either locally or in Google Cloud Storage.
+- Member access to recordings follows the same subscription gate as the live room.
 
 ## Storage modes
 

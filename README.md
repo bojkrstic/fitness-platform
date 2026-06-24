@@ -75,6 +75,7 @@ Ako želiš da koristiš `.env` fajl u root-u projekta:
 ```env
 DATABASE_URL=postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable
 PORT=8080
+APP_BASE_URL=http://localhost:8080
 SEED_ADMIN_EMAIL=admin@fitness.local
 SEED_ADMIN_PASSWORD=Admin123!
 WEBRTC_TURN_HOST=localhost
@@ -83,11 +84,18 @@ WEBRTC_TURN_USERNAME=fitness
 WEBRTC_TURN_PASSWORD=change-this-turn-password
 WEBRTC_TURN_REALM=fitness-platform
 WEBRTC_TURN_EXTERNAL_IP=127.0.0.1
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID=price_...
 GCS_RECORDINGS_BUCKET=fitness-recordings-bucket
 GCS_SERVICE_ACCOUNT_EMAIL=recordings-uploader@PROJECT_ID.iam.gserviceaccount.com
 GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
 RECORDINGS_DIR=recordings
 ```
+
+Billing uses Stripe Checkout for subscription purchases, Stripe webhooks for state sync, and the Stripe customer portal for subscription management.
+
+For local Docker Compose runs, `APP_BASE_URL` defaults to `http://localhost:8020`, so you only need to supply the three Stripe values to enable billing.
 
 Za video između različitih mreža potreban je TURN server. Docker Compose podiže
 Coturn servis i aplikaciji prosleđuje TURN konfiguraciju preko `WEBRTC_TURN_*`
