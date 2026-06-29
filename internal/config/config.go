@@ -14,12 +14,43 @@ type Config struct {
 	SeedAdminEmail    string
 	SeedAdminPassword string
 	WebRTCICEServers  []ICEServer
+	RecordingStorage  RecordingStorage
+	Billing           Billing
 }
 
 type ICEServer struct {
 	URLs       any    `json:"urls"`
 	Username   string `json:"username,omitempty"`
 	Credential string `json:"credential,omitempty"`
+}
+
+type RecordingStorage struct {
+	Bucket              string
+	ServiceAccountEmail string
+	PrivateKey          string
+	LocalDir            string
+}
+
+type Billing struct {
+	AppBaseURL          string
+	StripeSecretKey     string
+	StripeWebhookSecret string
+	StripePriceID       string
+}
+
+func (s RecordingStorage) Enabled() bool {
+	return true
+}
+
+func (s RecordingStorage) UsesGCS() bool {
+	return s.Bucket != "" && s.ServiceAccountEmail != "" && s.PrivateKey != ""
+}
+
+func (s RecordingStorage) ModeLabel() string {
+	if s.UsesGCS() {
+		return "Google Cloud Storage"
+	}
+	return "Local storage"
 }
 
 func Load() (Config, error) {
@@ -38,6 +69,18 @@ func Load() (Config, error) {
 		SeedAdminEmail:    envOrDefault("SEED_ADMIN_EMAIL", "admin@fitness.local"),
 		SeedAdminPassword: envOrDefault("SEED_ADMIN_PASSWORD", "Admin123!"),
 		WebRTCICEServers:  iceServers,
+		RecordingStorage: RecordingStorage{
+			Bucket:              strings.TrimSpace(os.Getenv("GCS_RECORDINGS_BUCKET")),
+			ServiceAccountEmail: strings.TrimSpace(os.Getenv("GCS_SERVICE_ACCOUNT_EMAIL")),
+			PrivateKey:          normalizePrivateKey(os.Getenv("GCS_PRIVATE_KEY")),
+			LocalDir:            envOrDefault("RECORDINGS_DIR", "recordings"),
+		},
+		Billing: Billing{
+			AppBaseURL:          strings.TrimSpace(os.Getenv("APP_BASE_URL")),
+			StripeSecretKey:     strings.TrimSpace(os.Getenv("STRIPE_SECRET_KEY")),
+			StripeWebhookSecret: strings.TrimSpace(os.Getenv("STRIPE_WEBHOOK_SECRET")),
+			StripePriceID:       strings.TrimSpace(os.Getenv("STRIPE_PRICE_ID")),
+		},
 	}
 
 	if cfg.DBURL == "" {
@@ -45,6 +88,13 @@ func Load() (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func normalizePrivateKey(value string) string {
+	value = strings.TrimSpace(value)
+	value = strings.Trim(value, `"'`)
+	value = strings.ReplaceAll(value, `\n`, "\n")
+	return value
 }
 
 func loadICEServers() ([]ICEServer, error) {

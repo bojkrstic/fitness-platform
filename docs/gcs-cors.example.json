@@ -1,0 +1,8 @@
+[
+  {
+    "origin": ["http://localhost:8020", "https://tvoj-domen.example"],
+    "method": ["PUT", "GET"],
+    "responseHeader": ["Content-Type", "Content-Disposition", "Content-Range", "Range"],
+    "maxAgeSeconds": 3600
+  }
+]

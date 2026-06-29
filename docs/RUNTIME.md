@@ -15,6 +15,10 @@ Useful env vars:
 - `PORT`
 - `SEED_ADMIN_EMAIL`
 - `SEED_ADMIN_PASSWORD`
+- `RECORDINGS_DIR`
+- `GCS_RECORDINGS_BUCKET`
+- `GCS_SERVICE_ACCOUNT_EMAIL`
+- `GCS_PRIVATE_KEY`
 
 Default values:
 
@@ -36,6 +40,7 @@ Default values:
 - `app` builds from `Dockerfile`
 - app connects to `db` through `DATABASE_URL=postgres://fitness:fitness@db:5432/fitness?sslmode=disable`
 - app exposes port `8080`
+- app stores local recordings in the `fitness_recordings` volume mounted at `/app/recordings`
 
 ## Dockerfile
 
@@ -46,4 +51,3 @@ Default values:
   - compiled binary
   - `web/templates`
   - `migrations`
-

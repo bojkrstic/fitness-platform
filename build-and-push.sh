@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 set -e
 
-# IMAGE="bojankrlekrstic/fitness-platform:latest"
-IMAGE="bojankrlekrstic/fitness-platform-svc:version1.0.2"
+IMAGE="${DOCKER_IMAGE:-bojankrlekrstic/fitness-platform-svc}"
+TAG="${DOCKER_TAG:-version1.0.7}"
+FULL_IMAGE="${IMAGE}:${TAG}"
 
-echo "Building Docker image: $IMAGE"
-docker build -t "$IMAGE" .
+echo "Building Docker image: $FULL_IMAGE"
+docker build -t "$FULL_IMAGE" .
 
 echo "Pushing image to Docker Hub..."
-docker push "$IMAGE"
+docker push "$FULL_IMAGE"
 
 echo "Done! Image is pushed to Docker Hub."

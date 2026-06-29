@@ -1,0 +1,47 @@
+{{define "content"}}
+<section class="card hero">
+  <div class="label">Billing</div>
+  <h1>Subscription management</h1>
+  <p class="muted">Use card payments to unlock live rooms and recordings.</p>
+</section>
+
+<section class="card stack">
+  {{if .Subscription}}
+    <div class="meta">
+      <span class="chip">Status: {{.Subscription.Status}}</span>
+      {{if .Subscription.CurrentPeriodEnd}}<span class="chip">Renews / ends: {{.Subscription.CurrentPeriodEnd}}</span>{{end}}
+      {{if .Subscription.CancelAtPeriodEnd}}<span class="chip">Cancel at period end</span>{{end}}
+    </div>
+  {{else}}
+    <p class="muted">No active subscription was found for this account.</p>
+  {{end}}
+
+  {{if eq .CurrentUser.Role "admin"}}
+    <p class="muted">Admin accounts keep access without a paid subscription.</p>
+  {{else if .BillingEnabled}}
+    <div class="toolbar">
+      {{if and .Subscription (or (eq .Subscription.Status "active") (eq .Subscription.Status "trialing"))}}
+        <form method="post" action="/billing/portal">
+          <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+          <button class="button secondary" type="submit">Manage subscription</button>
+        </form>
+      {{else}}
+        <form method="post" action="/billing/checkout">
+          <input type="hidden" name="return_to" value="{{.ReturnTo}}">
+          <button class="button" type="submit">Subscribe with card</button>
+        </form>
+      {{end}}
+    </div>
+  {{else}}
+    <p class="error">{{.BillingDisabledReason}}</p>
+  {{end}}
+</section>
+
+<section class="card stack">
+  <div class="label">Access rules</div>
+  <p class="muted">
+    Active subscriptions unlock training rooms and their recordings. Admin users keep their existing full access.
+  </p>
+  <p><a class="button secondary" href="/trainings">Back to trainings</a></p>
+</section>
+{{end}}

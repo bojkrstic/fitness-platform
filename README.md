@@ -2,6 +2,10 @@
 
 Go + Gin aplikacija sa PostgreSQL bazom, auth sistemom, admin panelom, training listom i WebSocket room-ovima za chat/video signaling.
 
+Detalji za snimanje i deployment su izdvojeni u:
+- [`docs/RECORDINGS.md`](./docs/RECORDINGS.md)
+- [`docs/DEPLOYMENT.md`](./docs/DEPLOYMENT.md)
+
 ## Struktura
 
 - `cmd/fitness-platform` - entrypoint aplikacije
@@ -47,7 +51,7 @@ Sa host mašine baza je dostupna na `localhost:5433`.
 
 ### Lokalno
 
-Ako aplikaciju pokrećeš lokalno preko `go run`, `make dev` ili lokalnog binarnog fajla, a bazu preko Docker Compose-a, koristi `localhost:5433`:
+Ako aplikaciju pokrećeš lokalno preko `go run`, `make dev`, `make local` ili lokalnog binarnog fajla, a bazu preko Docker Compose-a, koristi `localhost:5433`:
 
 ```bash
 export DATABASE_URL='postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable'
@@ -61,6 +65,12 @@ go build -o fitnes-api ./cmd/fitness-platform
 ### Preko Makefile
 
 ```bash
+make local
+```
+
+Ili:
+
+```bash
 make dev
 ```
 
@@ -71,6 +81,7 @@ Ako želiš da koristiš `.env` fajl u root-u projekta:
 ```env
 DATABASE_URL=postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable
 PORT=8080
+APP_BASE_URL=http://localhost:8080
 SEED_ADMIN_EMAIL=admin@fitness.local
 SEED_ADMIN_PASSWORD=Admin123!
 WEBRTC_TURN_HOST=localhost
@@ -79,7 +90,18 @@ WEBRTC_TURN_USERNAME=fitness
 WEBRTC_TURN_PASSWORD=change-this-turn-password
 WEBRTC_TURN_REALM=fitness-platform
 WEBRTC_TURN_EXTERNAL_IP=127.0.0.1
+STRIPE_SECRET_KEY=sk_test_...
+STRIPE_WEBHOOK_SECRET=whsec_...
+STRIPE_PRICE_ID=price_...
+GCS_RECORDINGS_BUCKET=fitness-recordings-bucket
+GCS_SERVICE_ACCOUNT_EMAIL=recordings-uploader@PROJECT_ID.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+RECORDINGS_DIR=recordings
 ```
+
+Billing uses Stripe Checkout for subscription purchases, Stripe webhooks for state sync, and the Stripe customer portal for subscription management.
+
+For local Docker Compose runs, `APP_BASE_URL` defaults to `http://localhost:8020`, so you only need to supply the three Stripe values to enable billing.
 
 Za video između različitih mreža potreban je TURN server. Docker Compose podiže
 Coturn servis i aplikaciji prosleđuje TURN konfiguraciju preko `WEBRTC_TURN_*`
@@ -93,6 +115,59 @@ Na serveru promeni:
 STUN često radi samo u istoj mreži ili iza jednostavnog NAT-a. TURN prosleđuje
 WebRTC media saobraćaj kada browseri ne mogu direktno da uspostave peer-to-peer
 vezu.
+
+## Snimanje treninga na Google Cloud Storage
+
+Snimanje koristi browser `MediaRecorder`. Admin snima svoj lokalni video/audio
+stream, browser uploaduje `.webm` fajl direktno na Google Cloud Storage, a
+aplikacija u PostgreSQL čuva samo metadata snimka.
+
+Potrebne varijable:
+
+```env
+GCS_RECORDINGS_BUCKET=fitness-recordings-bucket
+GCS_SERVICE_ACCOUNT_EMAIL=recordings-uploader@PROJECT_ID.iam.gserviceaccount.com
+GCS_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----\n"
+```
+
+Service account treba pravo da upisuje i čita objekte u bucket-u, npr.
+`Storage Object User` za konkretan bucket. Bucket treba da ostane privatan;
+aplikacija izdaje kratkotrajne signed URL linkove za upload, gledanje i
+download.
+
+Ako GCS varijable nisu podešene, aplikacija koristi lokalni storage u
+`RECORDINGS_DIR` direktorijumu. To znači da recording radi odmah i u dev
+okruženju bez dodatnog cloud setup-a.
+
+Ako koristiš GCS, browser upload chunkova zahteva CORS pravilo na bucket-u.
+Backend otvara GCS resumable session, tako da browser ne mora da cita
+`Location` header sa GCS `POST` odgovora; browser direktno radi samo `PUT`
+chunk upload.
+
+```json
+[
+  {
+    "origin": ["http://localhost:8020", "https://tvoj-domen.example"],
+    "method": ["PUT", "GET"],
+    "responseHeader": ["Content-Type", "Content-Disposition", "Content-Range", "Range"],
+    "maxAgeSeconds": 3600
+  }
+]
+```
+
+Primena preko `gcloud`:
+
+```bash
+gcloud storage buckets update gs://fitness-recordings-bucket --cors-file=cors.json
+```
+
+Ako je storage lokalni, CORS ti ne treba.
+
+Snimci se organizuju po datumu i treningu:
+
+```text
+recordings/YYYY/MM/DD/{training_id}/{recording_id}.webm
+```
 
 ## Komande
 
@@ -128,7 +203,7 @@ Workflow objavljuje:
 Image koji se koristi na serveru:
 
 ```text
-bojankrlekrstic/fitness-platform:version1.1.4
+bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Ako prvi put podižeš aplikaciju bez `docker compose`, napravi network i PostgreSQL
@@ -171,7 +246,7 @@ docker run -d \
   -e SEED_ADMIN_EMAIL='admin@fitness.local' \
   -e SEED_ADMIN_PASSWORD='Admin123!' \
   -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' \
-  bojankrlekrstic/fitness-platform:version1.1.4
+  bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Ako koristiš TURN server za video između različitih mreža, pokreni sa
@@ -187,7 +262,7 @@ docker run -d \
   -e SEED_ADMIN_EMAIL='admin@fitness.local' \
   -e SEED_ADMIN_PASSWORD='Admin123!' \
   -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"},{"urls":"turns:turn.example.com:5349","username":"turn-user","credential":"turn-password"}]' \
-  bojankrlekrstic/fitness-platform:version1.1.4
+  bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Proveri logove:
@@ -237,7 +312,7 @@ docker rm -f fitness-platform-app-1
 ```
 
 ```bash
-docker run -d --name fitness-platform-app-1 --network fitness-platform_global -p 8020:8080 -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' -e PORT=8080 -e SEED_ADMIN_EMAIL='admin@fitness.local' -e SEED_ADMIN_PASSWORD='Admin123!' -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' bojankrlekrstic/fitness-platform:version1.1.4
+docker run -d --name fitness-platform-app-1 --network fitness-platform_global -p 8020:8080 -e DATABASE_URL='postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable' -e PORT=8080 -e SEED_ADMIN_EMAIL='admin@fitness.local' -e SEED_ADMIN_PASSWORD='Admin123!' -e WEBRTC_ICE_SERVERS='[{"urls":"stun:stun.l.google.com:19302"}]' bojankrlekrstic/fitness-platform-svc:version1.1.5
 ```
 
 Kako se pokrece na serveru:
@@ -245,6 +320,6 @@ pre toga se pokrene ./build-and-push.sh sa novom verzijom i onda se krene dalje,
 
 1. docker ps
 2. docker rm -f fitness-platform-app-1
-3. docker pull bojankrlekrstic/fitness-platform-svc:version1.0.0
-4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.0.0
+3. docker pull bojankrlekrstic/fitness-platform-svc:version1.1.5
+4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.1.5
 5. curl http://localhost:8020    -> ovo je test
