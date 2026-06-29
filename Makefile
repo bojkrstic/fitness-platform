@@ -1,4 +1,4 @@
-.PHONY: dev up build build-linux test docker-build docker-push clean
+.PHONY: dev local up build build-linux test docker-build docker-push clean
 
 GOFLAGS ?= -mod=mod
 GOCACHE ?= /tmp/gocache
@@ -7,6 +7,8 @@ DOCKER_TAG ?= latest
 
 dev:
 	@GOCACHE=$(GOCACHE) GOFLAGS=$(GOFLAGS) go run ./cmd/fitness-platform
+
+local: dev
 
 up:
 	@docker compose up --build

@@ -586,8 +586,8 @@ func (s *Service) ensureDefaultTrainings(ctx context.Context) error {
 	}
 
 	defaults := []model.TrainingForm{
-		{Title: "Morning HIIT", Trainer: "Ana", Description: "Intenzivan trening za celo telo.", Time: "09:00"},
-		{Title: "Yoga Flow", Trainer: "Marko", Description: "Lagani joga trening za istezanje.", Time: "18:00"},
+		{Title: "Trening Goran Krstic", Trainer: "Goran Krstic", Description: "Intenzivan trening za celo telo.", Time: "09:00"},
+		{Title: "Trening Emanuela Krstic", Trainer: "fitnes instruktor Emanuela", Description: "Program za snagu, fleksibilnost i kontrolu pokreta.", Time: "18:00"},
 	}
 
 	for _, input := range defaults {

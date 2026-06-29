@@ -51,7 +51,7 @@ Sa host mašine baza je dostupna na `localhost:5433`.
 
 ### Lokalno
 
-Ako aplikaciju pokrećeš lokalno preko `go run`, `make dev` ili lokalnog binarnog fajla, a bazu preko Docker Compose-a, koristi `localhost:5433`:
+Ako aplikaciju pokrećeš lokalno preko `go run`, `make dev`, `make local` ili lokalnog binarnog fajla, a bazu preko Docker Compose-a, koristi `localhost:5433`:
 
 ```bash
 export DATABASE_URL='postgres://fitness:fitness@localhost:5433/fitness?sslmode=disable'
@@ -63,6 +63,12 @@ go build -o fitnes-api ./cmd/fitness-platform
 ```
 
 ### Preko Makefile
+
+```bash
+make local
+```
+
+Ili:
 
 ```bash
 make dev
