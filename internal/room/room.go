@@ -17,7 +17,7 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-const MaxParticipants = 5
+const MaxParticipants = 50
 
 var ErrRoomFull = errors.New("room full")
 

@@ -616,7 +616,7 @@
     }
 
     if (msg.type === "room-full") {
-      appendMessage("System", "This room already has five participants.", "system");
+      appendMessage("System", "This room already has 50 participants.", "system");
       setState("Room full");
       socket.close();
       return;
