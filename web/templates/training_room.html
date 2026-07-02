@@ -34,6 +34,7 @@
       {{if eq .CurrentUser.Role "admin"}}
         <button id="record-start" class="button" type="button" {{if not .RecordingEnabled}}disabled{{end}}>Start recording</button>
         <button id="record-stop" class="button secondary" type="button" disabled>Stop & upload</button>
+        <button id="record-retry-save" class="button secondary" type="button" hidden disabled>Retry save</button>
       {{end}}
     </div>
     <div class="meta">
@@ -81,6 +82,7 @@
   const fullscreenButton = document.getElementById("video-fullscreen");
   const recordStartButton = document.getElementById("record-start");
   const recordStopButton = document.getElementById("record-stop");
+  const recordRetrySaveButton = document.getElementById("record-retry-save");
   const stateBadge = document.getElementById("video-state");
   const recordStateBadge = document.getElementById("record-state");
   const iceServers = {{json .ICEServers}};
@@ -106,8 +108,10 @@
   let recordingFinalizeRequested = false;
   let recordingUploadInProgress = false;
   let recordingFailed = false;
+  let recordingSavePending = false;
   const recordingChunkAlignment = 256 * 1024;
   const recordingUploadTargetSize = 8 * 1024 * 1024;
+  const recordingCompleteMaxAttempts = 4;
   const broadcasterConnections = new Map();
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
@@ -271,7 +275,8 @@
         const isFinalChunk = recordingFinalizeRequested && recordingChunkQueue.length === 0;
         await uploadRecordingChunk(chunk, isFinalChunk);
         if (isFinalChunk) {
-          await completeRecordingMetadata();
+          recordingSavePending = true;
+          await completeRecordingMetadataWithRetry();
           return;
         }
       }
@@ -284,13 +289,20 @@
       }
     } catch (err) {
       console.error("Recording upload failed", err);
-      appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
       recordingFailed = true;
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
       }
-      setRecordState("Upload failed");
-      recordStartButton.disabled = false;
+      if (recordingSavePending) {
+        appendMessage("System", "Recording save failed. You can retry without recording again.", "system");
+        setRecordState("Save failed - retry");
+        setRetrySaveVisible(true);
+        recordStartButton.disabled = true;
+      } else {
+        appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
+        setRecordState("Upload failed");
+        recordStartButton.disabled = false;
+      }
       recordStopButton.disabled = true;
     } finally {
       recordingUploadInProgress = false;
@@ -372,13 +384,70 @@
       }),
     });
     if (!completeResponse.ok) {
-      throw new Error(await completeResponse.text());
+      const err = new Error(await completeResponse.text());
+      err.status = completeResponse.status;
+      throw err;
     }
 
     setRecordState("Uploaded");
     appendMessage("System", "Recording uploaded. Refreshing the room list.", "system");
     resetRecordingState("Uploaded");
     location.reload();
+  }
+
+  async function completeRecordingMetadataWithRetry() {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= recordingCompleteMaxAttempts; attempt += 1) {
+      try {
+        setRetrySaveVisible(false);
+        setRecordState(attempt === 1 ? "Saving" : `Saving - retry ${attempt}`);
+        await completeRecordingMetadata();
+        return;
+      } catch (err) {
+        lastError = err;
+        if (!isRetryableRecordingSaveError(err) || attempt === recordingCompleteMaxAttempts) {
+          break;
+        }
+        await sleep(1000 * attempt);
+      }
+    }
+
+    throw lastError || new Error("Recording save failed");
+  }
+
+  function isRetryableRecordingSaveError(err) {
+    const status = Number(err && err.status);
+    return !status || status >= 500 || status === 408 || status === 409 || status === 429;
+  }
+
+  async function retryRecordingSave() {
+    if (!recordingSavePending || !recordingUpload || recordingUploadInProgress) return;
+    recordingFailed = false;
+    recordingUploadInProgress = true;
+    recordRetrySaveButton.disabled = true;
+
+    try {
+      await completeRecordingMetadataWithRetry();
+    } catch (err) {
+      console.error("Recording save retry failed", err);
+      recordingFailed = true;
+      setRecordState("Save failed - retry");
+      setRetrySaveVisible(true);
+      appendMessage("System", "Recording save retry failed. Try again before leaving this page.", "system");
+    } finally {
+      recordingUploadInProgress = false;
+    }
+  }
+
+  function setRetrySaveVisible(visible) {
+    if (!recordRetrySaveButton) return;
+    recordRetrySaveButton.hidden = !visible;
+    recordRetrySaveButton.disabled = !visible;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function resetRecordingState(label) {
@@ -392,6 +461,8 @@
     recordingFinalizeRequested = false;
     recordingUploadInProgress = false;
     recordingFailed = false;
+    recordingSavePending = false;
+    setRetrySaveVisible(false);
     recordStartButton.disabled = !recordingEnabled;
     recordStopButton.disabled = true;
     setRecordState(label);
@@ -596,6 +667,11 @@
     recordStopButton.addEventListener("click", () => {
       stopRecording();
     });
+    if (recordRetrySaveButton) {
+      recordRetrySaveButton.addEventListener("click", () => {
+        void retryRecordingSave();
+      });
+    }
   }
 
   document.addEventListener("fullscreenchange", () => {

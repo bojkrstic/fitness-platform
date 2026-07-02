@@ -174,6 +174,11 @@ func (h *HttpHandler) mustCurrentUser(c *gin.Context) *model.User {
 func (h *HttpHandler) requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, ok := h.currentUser(c); !ok {
+			if c.Request.Method != http.MethodGet {
+				c.String(http.StatusUnauthorized, "unauthorized")
+				c.Abort()
+				return
+			}
 			target := "/auth/login?next=" + url.QueryEscape(c.Request.URL.RequestURI())
 			c.Redirect(http.StatusSeeOther, target)
 			c.Abort()
@@ -187,6 +192,11 @@ func (h *HttpHandler) requireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := h.currentUser(c)
 		if !ok {
+			if c.Request.Method != http.MethodGet {
+				c.String(http.StatusUnauthorized, "unauthorized")
+				c.Abort()
+				return
+			}
 			target := "/auth/login?next=" + url.QueryEscape(c.Request.URL.RequestURI())
 			c.Redirect(http.StatusSeeOther, target)
 			c.Abort()
@@ -345,7 +355,7 @@ func (h *HttpHandler) completeRecordingHandler(c *gin.Context) {
 		SizeBytes:        input.SizeBytes,
 		DurationSeconds:  input.DurationSeconds,
 		CreatedBy:        user.ID,
-	})
+	}, strings.TrimSpace(input.UploadID))
 	if err != nil {
 		if errors.Is(err, service.ErrStorageDisabled) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": h.svc.RecordingStorageDisabledReason()})

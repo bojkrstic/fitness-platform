@@ -1,4 +1,4 @@
-.PHONY: dev local up build build-linux test docker-build docker-push clean
+.PHONY: dev local up build build-linux test docker-build docker-push deploy-server clean
 
 GOFLAGS ?= -mod=mod
 GOCACHE ?= /tmp/gocache
@@ -27,6 +27,9 @@ docker-build:
 
 docker-push: docker-build
 	@docker push $(DOCKER_IMAGE):$(DOCKER_TAG)
+
+deploy-server:
+	@DOCKER_IMAGE=$(DOCKER_IMAGE) DOCKER_TAG=$(DOCKER_TAG) ./deploy/run-app.sh
 
 clean:
 	@rm -f fitnes-api
