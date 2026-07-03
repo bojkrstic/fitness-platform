@@ -39,6 +39,9 @@
     </div>
     <div class="meta">
       <span id="video-state" class="chip">Connecting</span>
+      {{if eq .CurrentUser.Role "admin"}}
+        <span id="viewer-count" class="chip">Online: 0 | Watching: 0</span>
+      {{end}}
       <span id="record-state" class="chip">Recording idle</span>
       <span class="chip">Storage: {{.RecordingStorageMode}}</span>
     </div>
@@ -84,6 +87,7 @@
   const recordStopButton = document.getElementById("record-stop");
   const recordRetrySaveButton = document.getElementById("record-retry-save");
   const stateBadge = document.getElementById("video-state");
+  const viewerCountBadge = document.getElementById("viewer-count");
   const recordStateBadge = document.getElementById("record-state");
   const iceServers = {{json .ICEServers}};
   const hasTurnServer = iceServers.some((server) => {
@@ -98,6 +102,7 @@
   let viewerConnection = null;
   let broadcasterId = null;
   let missingTurnNoticeShown = false;
+  let lastSentWatching = false;
   let mediaRecorder = null;
   let recordingUpload = null;
   let recordingSessionUrl = "";
@@ -136,6 +141,24 @@
 
   function setState(value) {
     stateBadge.textContent = value;
+  }
+
+  function updateViewerStats() {
+    if (!viewerCountBadge) return;
+
+    const viewers = participants.filter((participant) => participant.role !== "admin");
+    const watching = viewers.filter((participant) => participant.watching).length;
+    viewerCountBadge.textContent = `Online: ${viewers.length} | Watching: ${watching}`;
+  }
+
+  function sendViewerStatus(watching) {
+    if (isAdmin || lastSentWatching === watching || socket.readyState !== WebSocket.OPEN) return;
+
+    lastSentWatching = watching;
+    socket.send(JSON.stringify({
+      type: "viewer-status",
+      watching,
+    }));
   }
 
   function setRecordState(value) {
@@ -499,15 +522,20 @@
       }
     };
     viewerConnection.ontrack = (event) => {
+      sendViewerStatus(false);
       remoteVideo.srcObject = event.streams[0];
       setState("Watching live");
     };
     viewerConnection.onconnectionstatechange = () => {
       if (viewerConnection.connectionState === "failed") {
+        sendViewerStatus(false);
         setState("Video connection failed");
         appendMessage("System", "Video could not cross the network. Configure a TURN server for external viewers.", "system");
       } else if (viewerConnection.connectionState === "disconnected") {
+        sendViewerStatus(false);
         setState("Video disconnected");
+      } else if (viewerConnection.connectionState === "closed") {
+        sendViewerStatus(false);
       }
     };
 
@@ -595,10 +623,15 @@
   async function syncVideoState() {
     if (!myClientId) return;
 
+    updateViewerStats();
+
     const admin = participants.find((participant) => participant.role === "admin");
     broadcasterId = admin ? admin.id : null;
 
     if (!isAdmin) {
+      if (!broadcasterId) {
+        sendViewerStatus(false);
+      }
       setState(broadcasterId ? "Waiting for stream" : "Waiting for admin");
       if (broadcasterId && !hasTurnServer && !missingTurnNoticeShown) {
         missingTurnNoticeShown = true;
@@ -632,7 +665,8 @@
       if (broadcasterConnections.has(viewerId)) continue;
       await sendOfferToViewer(viewerId);
     }
-    setState(`Live to ${viewerIds.length}`);
+    const watchingCount = participants.filter((participant) => participant.role !== "admin" && participant.watching).length;
+    setState(`Live to ${watchingCount}/${viewerIds.length}`);
   }
 
   async function sendOfferToViewer(viewerId) {
@@ -679,6 +713,25 @@
   });
 
   updateFullscreenButtonLabel();
+
+  if (!isAdmin) {
+    remoteVideo.addEventListener("playing", () => {
+      sendViewerStatus(true);
+      setState("Watching live");
+    });
+    remoteVideo.addEventListener("pause", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("ended", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("emptied", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("stalled", () => {
+      sendViewerStatus(false);
+    });
+  }
 
   socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
@@ -763,6 +816,7 @@
   });
 
   window.addEventListener("beforeunload", () => {
+    sendViewerStatus(false);
     if (viewerConnection) {
       viewerConnection.close();
     }

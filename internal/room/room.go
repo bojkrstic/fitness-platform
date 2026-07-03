@@ -36,19 +36,26 @@ type Room struct {
 }
 
 type Client struct {
-	id     string
-	roomID string
-	user   *model.User
-	conn   *websocket.Conn
-	send   chan []byte
-	hub    *Hub
-	once   sync.Once
+	id       string
+	roomID   string
+	user     *model.User
+	conn     *websocket.Conn
+	send     chan []byte
+	hub      *Hub
+	watching bool
+	once     sync.Once
 }
 
 type Participant struct {
-	ID    string `json:"id"`
-	Email string `json:"email"`
-	Role  string `json:"role"`
+	ID       string `json:"id"`
+	Email    string `json:"email"`
+	Role     string `json:"role"`
+	Watching bool   `json:"watching"`
+}
+
+type Stats struct {
+	Online   int `json:"online"`
+	Watching int `json:"watching"`
 }
 
 type Message struct {
@@ -63,6 +70,7 @@ type Message struct {
 	History      []Message       `json:"history,omitempty"`
 	ClientID     string          `json:"clientId,omitempty"`
 	Timestamp    string          `json:"timestamp,omitempty"`
+	Watching     bool            `json:"watching,omitempty"`
 }
 
 func NewHub() *Hub {
@@ -219,6 +227,50 @@ func (h *Hub) SendTo(roomID, targetID string, message Message) {
 	}
 }
 
+func (h *Hub) SetWatching(roomID string, c *Client, watching bool) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	room := h.rooms[roomID]
+	if room == nil {
+		return false
+	}
+	if _, ok := room.clients[c]; !ok {
+		return false
+	}
+	if c.watching == watching {
+		return false
+	}
+
+	c.watching = watching
+	log.Printf("room=%s viewer-status user=%s client=%s watching=%t", roomID, c.user.Email, c.id, watching)
+	return true
+}
+
+func (h *Hub) Stats(roomIDs []string) map[string]Stats {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	stats := make(map[string]Stats, len(roomIDs))
+	for _, roomID := range roomIDs {
+		roomStats := Stats{}
+		room := h.rooms[roomID]
+		if room != nil {
+			for client := range room.clients {
+				if client.user.Role == "admin" {
+					continue
+				}
+				roomStats.Online++
+				if client.watching {
+					roomStats.Watching++
+				}
+			}
+		}
+		stats[roomID] = roomStats
+	}
+	return stats
+}
+
 func (h *Hub) BroadcastParticipants(roomID string) {
 	h.mu.Lock()
 	room := h.rooms[roomID]
@@ -257,9 +309,10 @@ func (r *Room) snapshotParticipants() []Participant {
 	participants := make([]Participant, 0, len(r.clients))
 	for client := range r.clients {
 		participants = append(participants, Participant{
-			ID:    client.id,
-			Email: client.user.Email,
-			Role:  client.user.Role,
+			ID:       client.id,
+			Email:    client.user.Email,
+			Role:     client.user.Role,
+			Watching: client.watching,
 		})
 	}
 
@@ -313,6 +366,13 @@ func (c *Client) ReadPump() {
 				continue
 			}
 			c.hub.Broadcast(c.roomID, message, c)
+		case "viewer-status":
+			if c.user.Role == "admin" {
+				continue
+			}
+			if c.hub.SetWatching(c.roomID, c, incoming.Watching) {
+				c.hub.BroadcastParticipants(c.roomID)
+			}
 		}
 	}
 }

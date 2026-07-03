@@ -78,6 +78,7 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 	admin := router.Group("/admin", h.requireAuth(), h.requireAdmin())
 	{
 		admin.GET("/", h.adminDashboardHandler)
+		admin.GET("/live-stats", h.adminLiveStatsHandler)
 		admin.POST("/trainings", h.createTrainingHandler)
 	}
 
@@ -558,17 +559,62 @@ func (h *HttpHandler) adminDashboardHandler(c *gin.Context) {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
+	adminTrainings := h.adminTrainingsWithLiveStats(trainings)
 
 	h.renderPage(c, http.StatusOK, "admin", model.AdminPageData{
 		BasePageData: model.BasePageData{
 			CurrentUser: h.mustCurrentUser(c),
 			Success:     map[string]string{"1": "Trening je kreiran."}[c.Query("created")],
 		},
-		Trainings:             trainings,
+		Trainings:             adminTrainings,
 		BillingEnabled:        h.svc.BillingEnabled(),
 		BillingDisabledReason: h.svc.BillingDisabledReason(),
 		StripePriceID:         h.cfg.Billing.StripePriceID,
 	})
+}
+
+func (h *HttpHandler) adminLiveStatsHandler(c *gin.Context) {
+	trainings, err := h.svc.HomeTrainings(c.Request.Context())
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	roomIDs := make([]string, 0, len(trainings))
+	for _, training := range trainings {
+		roomIDs = append(roomIDs, training.ID)
+	}
+	stats := h.hub.Stats(roomIDs)
+
+	response := make(map[string]model.LiveStats, len(stats))
+	for roomID, stat := range stats {
+		response[roomID] = model.LiveStats{
+			Online:   stat.Online,
+			Watching: stat.Watching,
+		}
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *HttpHandler) adminTrainingsWithLiveStats(trainings []model.Training) []model.AdminTraining {
+	roomIDs := make([]string, 0, len(trainings))
+	for _, training := range trainings {
+		roomIDs = append(roomIDs, training.ID)
+	}
+	stats := h.hub.Stats(roomIDs)
+
+	adminTrainings := make([]model.AdminTraining, 0, len(trainings))
+	for _, training := range trainings {
+		stat := stats[training.ID]
+		adminTrainings = append(adminTrainings, model.AdminTraining{
+			Training: training,
+			LiveStats: model.LiveStats{
+				Online:   stat.Online,
+				Watching: stat.Watching,
+			},
+		})
+	}
+	return adminTrainings
 }
 
 func (h *HttpHandler) createTrainingHandler(c *gin.Context) {
@@ -592,7 +638,7 @@ func (h *HttpHandler) createTrainingHandler(c *gin.Context) {
 					CurrentUser: h.mustCurrentUser(c),
 					Error:       "Sva polja su obavezna.",
 				},
-				Trainings: trainings,
+				Trainings: h.adminTrainingsWithLiveStats(trainings),
 				Form:      input,
 			})
 			return

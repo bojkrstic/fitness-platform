@@ -54,6 +54,10 @@
           <div class="meta">
             <span class="chip">{{.Time}}</span>
             <span>{{.Trainer}}</span>
+            <span class="chip live-stats" data-training-id="{{.ID}}">
+              Online: <span data-stat="online">{{.LiveStats.Online}}</span> |
+              Watching: <span data-stat="watching">{{.LiveStats.Watching}}</span>
+            </span>
           </div>
           <h2>{{.Title}}</h2>
           <p class="muted">{{.Description}}</p>
@@ -65,4 +69,34 @@
     </section>
   </div>
 </div>
+
+<script>
+(() => {
+  const statBadges = Array.from(document.querySelectorAll(".live-stats"));
+  if (statBadges.length === 0) return;
+
+  async function refreshLiveStats() {
+    try {
+      const response = await fetch("/admin/live-stats", {
+        headers: { "Accept": "application/json" },
+      });
+      if (!response.ok) return;
+
+      const stats = await response.json();
+      for (const badge of statBadges) {
+        const trainingStats = stats[badge.dataset.trainingId];
+        if (!trainingStats) continue;
+
+        badge.querySelector('[data-stat="online"]').textContent = trainingStats.online;
+        badge.querySelector('[data-stat="watching"]').textContent = trainingStats.watching;
+      }
+    } catch (err) {
+      console.warn("Live stats refresh failed", err);
+    }
+  }
+
+  window.setInterval(refreshLiveStats, 5000);
+  void refreshLiveStats();
+})();
+</script>
 {{end}}
