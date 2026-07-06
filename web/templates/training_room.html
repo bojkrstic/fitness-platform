@@ -34,10 +34,14 @@
       {{if eq .CurrentUser.Role "admin"}}
         <button id="record-start" class="button" type="button" {{if not .RecordingEnabled}}disabled{{end}}>Start recording</button>
         <button id="record-stop" class="button secondary" type="button" disabled>Stop & upload</button>
+        <button id="record-retry-save" class="button secondary" type="button" hidden disabled>Retry save</button>
       {{end}}
     </div>
     <div class="meta">
       <span id="video-state" class="chip">Connecting</span>
+      {{if eq .CurrentUser.Role "admin"}}
+        <span id="viewer-count" class="chip">Online: 0 | Watching: 0</span>
+      {{end}}
       <span id="record-state" class="chip">Recording idle</span>
       <span class="chip">Storage: {{.RecordingStorageMode}}</span>
     </div>
@@ -54,7 +58,25 @@
             <div class="meta">
               <a class="button secondary" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/view" target="_blank" rel="noopener">View</a>
               <a class="button" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/download">Download</a>
+              {{if eq $.CurrentUser.Role "admin"}}
+                <button class="button secondary" type="button" onclick="document.getElementById('rename-{{.ID}}').hidden = !document.getElementById('rename-{{.ID}}').hidden">Rename</button>
+                <form method="post" action="/trainings/{{.TrainingID}}/recordings/{{.ID}}/delete" style="display:inline;" onsubmit="return confirm('Delete this recording? It will be hidden now and permanently removed after 2 days.');">
+                  <button class="button secondary" type="submit">Delete</button>
+                </form>
+              {{end}}
             </div>
+            {{if eq $.CurrentUser.Role "admin"}}
+              <form id="rename-{{.ID}}" class="meta" method="post" action="/trainings/{{.TrainingID}}/recordings/{{.ID}}/rename" style="margin-top:12px;" hidden>
+                <label style="flex:1; min-width:180px;">
+                  Name
+                  <span class="meta" style="gap:8px;">
+                    <input name="filename" value="{{.NameBase}}" required />
+                    <span class="chip">.webm</span>
+                  </span>
+                </label>
+                <button class="button secondary" type="submit">Save</button>
+              </form>
+            {{end}}
           </div>
         {{end}}
       </div>
@@ -81,7 +103,9 @@
   const fullscreenButton = document.getElementById("video-fullscreen");
   const recordStartButton = document.getElementById("record-start");
   const recordStopButton = document.getElementById("record-stop");
+  const recordRetrySaveButton = document.getElementById("record-retry-save");
   const stateBadge = document.getElementById("video-state");
+  const viewerCountBadge = document.getElementById("viewer-count");
   const recordStateBadge = document.getElementById("record-state");
   const iceServers = {{json .ICEServers}};
   const hasTurnServer = iceServers.some((server) => {
@@ -96,6 +120,7 @@
   let viewerConnection = null;
   let broadcasterId = null;
   let missingTurnNoticeShown = false;
+  let lastSentWatching = false;
   let mediaRecorder = null;
   let recordingUpload = null;
   let recordingSessionUrl = "";
@@ -106,8 +131,10 @@
   let recordingFinalizeRequested = false;
   let recordingUploadInProgress = false;
   let recordingFailed = false;
+  let recordingSavePending = false;
   const recordingChunkAlignment = 256 * 1024;
   const recordingUploadTargetSize = 8 * 1024 * 1024;
+  const recordingCompleteMaxAttempts = 4;
   const broadcasterConnections = new Map();
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
@@ -132,6 +159,24 @@
 
   function setState(value) {
     stateBadge.textContent = value;
+  }
+
+  function updateViewerStats() {
+    if (!viewerCountBadge) return;
+
+    const viewers = participants.filter((participant) => participant.role !== "admin");
+    const watching = viewers.filter((participant) => participant.watching).length;
+    viewerCountBadge.textContent = `Online: ${viewers.length} | Watching: ${watching}`;
+  }
+
+  function sendViewerStatus(watching) {
+    if (isAdmin || lastSentWatching === watching || socket.readyState !== WebSocket.OPEN) return;
+
+    lastSentWatching = watching;
+    socket.send(JSON.stringify({
+      type: "viewer-status",
+      watching,
+    }));
   }
 
   function setRecordState(value) {
@@ -271,7 +316,8 @@
         const isFinalChunk = recordingFinalizeRequested && recordingChunkQueue.length === 0;
         await uploadRecordingChunk(chunk, isFinalChunk);
         if (isFinalChunk) {
-          await completeRecordingMetadata();
+          recordingSavePending = true;
+          await completeRecordingMetadataWithRetry();
           return;
         }
       }
@@ -284,13 +330,20 @@
       }
     } catch (err) {
       console.error("Recording upload failed", err);
-      appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
       recordingFailed = true;
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
         mediaRecorder.stop();
       }
-      setRecordState("Upload failed");
-      recordStartButton.disabled = false;
+      if (recordingSavePending) {
+        appendMessage("System", "Recording save failed. You can retry without recording again.", "system");
+        setRecordState("Save failed - retry");
+        setRetrySaveVisible(true);
+        recordStartButton.disabled = true;
+      } else {
+        appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
+        setRecordState("Upload failed");
+        recordStartButton.disabled = false;
+      }
       recordStopButton.disabled = true;
     } finally {
       recordingUploadInProgress = false;
@@ -372,13 +425,70 @@
       }),
     });
     if (!completeResponse.ok) {
-      throw new Error(await completeResponse.text());
+      const err = new Error(await completeResponse.text());
+      err.status = completeResponse.status;
+      throw err;
     }
 
     setRecordState("Uploaded");
     appendMessage("System", "Recording uploaded. Refreshing the room list.", "system");
     resetRecordingState("Uploaded");
     location.reload();
+  }
+
+  async function completeRecordingMetadataWithRetry() {
+    let lastError = null;
+
+    for (let attempt = 1; attempt <= recordingCompleteMaxAttempts; attempt += 1) {
+      try {
+        setRetrySaveVisible(false);
+        setRecordState(attempt === 1 ? "Saving" : `Saving - retry ${attempt}`);
+        await completeRecordingMetadata();
+        return;
+      } catch (err) {
+        lastError = err;
+        if (!isRetryableRecordingSaveError(err) || attempt === recordingCompleteMaxAttempts) {
+          break;
+        }
+        await sleep(1000 * attempt);
+      }
+    }
+
+    throw lastError || new Error("Recording save failed");
+  }
+
+  function isRetryableRecordingSaveError(err) {
+    const status = Number(err && err.status);
+    return !status || status >= 500 || status === 408 || status === 409 || status === 429;
+  }
+
+  async function retryRecordingSave() {
+    if (!recordingSavePending || !recordingUpload || recordingUploadInProgress) return;
+    recordingFailed = false;
+    recordingUploadInProgress = true;
+    recordRetrySaveButton.disabled = true;
+
+    try {
+      await completeRecordingMetadataWithRetry();
+    } catch (err) {
+      console.error("Recording save retry failed", err);
+      recordingFailed = true;
+      setRecordState("Save failed - retry");
+      setRetrySaveVisible(true);
+      appendMessage("System", "Recording save retry failed. Try again before leaving this page.", "system");
+    } finally {
+      recordingUploadInProgress = false;
+    }
+  }
+
+  function setRetrySaveVisible(visible) {
+    if (!recordRetrySaveButton) return;
+    recordRetrySaveButton.hidden = !visible;
+    recordRetrySaveButton.disabled = !visible;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => window.setTimeout(resolve, ms));
   }
 
   function resetRecordingState(label) {
@@ -392,6 +502,8 @@
     recordingFinalizeRequested = false;
     recordingUploadInProgress = false;
     recordingFailed = false;
+    recordingSavePending = false;
+    setRetrySaveVisible(false);
     recordStartButton.disabled = !recordingEnabled;
     recordStopButton.disabled = true;
     setRecordState(label);
@@ -428,15 +540,20 @@
       }
     };
     viewerConnection.ontrack = (event) => {
+      sendViewerStatus(false);
       remoteVideo.srcObject = event.streams[0];
       setState("Watching live");
     };
     viewerConnection.onconnectionstatechange = () => {
       if (viewerConnection.connectionState === "failed") {
+        sendViewerStatus(false);
         setState("Video connection failed");
         appendMessage("System", "Video could not cross the network. Configure a TURN server for external viewers.", "system");
       } else if (viewerConnection.connectionState === "disconnected") {
+        sendViewerStatus(false);
         setState("Video disconnected");
+      } else if (viewerConnection.connectionState === "closed") {
+        sendViewerStatus(false);
       }
     };
 
@@ -524,10 +641,15 @@
   async function syncVideoState() {
     if (!myClientId) return;
 
+    updateViewerStats();
+
     const admin = participants.find((participant) => participant.role === "admin");
     broadcasterId = admin ? admin.id : null;
 
     if (!isAdmin) {
+      if (!broadcasterId) {
+        sendViewerStatus(false);
+      }
       setState(broadcasterId ? "Waiting for stream" : "Waiting for admin");
       if (broadcasterId && !hasTurnServer && !missingTurnNoticeShown) {
         missingTurnNoticeShown = true;
@@ -561,7 +683,8 @@
       if (broadcasterConnections.has(viewerId)) continue;
       await sendOfferToViewer(viewerId);
     }
-    setState(`Live to ${viewerIds.length}`);
+    const watchingCount = participants.filter((participant) => participant.role !== "admin" && participant.watching).length;
+    setState(`Live to ${watchingCount}/${viewerIds.length}`);
   }
 
   async function sendOfferToViewer(viewerId) {
@@ -596,6 +719,11 @@
     recordStopButton.addEventListener("click", () => {
       stopRecording();
     });
+    if (recordRetrySaveButton) {
+      recordRetrySaveButton.addEventListener("click", () => {
+        void retryRecordingSave();
+      });
+    }
   }
 
   document.addEventListener("fullscreenchange", () => {
@@ -603,6 +731,25 @@
   });
 
   updateFullscreenButtonLabel();
+
+  if (!isAdmin) {
+    remoteVideo.addEventListener("playing", () => {
+      sendViewerStatus(true);
+      setState("Watching live");
+    });
+    remoteVideo.addEventListener("pause", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("ended", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("emptied", () => {
+      sendViewerStatus(false);
+    });
+    remoteVideo.addEventListener("stalled", () => {
+      sendViewerStatus(false);
+    });
+  }
 
   socket.addEventListener("message", async (event) => {
     const msg = JSON.parse(event.data);
@@ -616,7 +763,7 @@
     }
 
     if (msg.type === "room-full") {
-      appendMessage("System", "This room already has five participants.", "system");
+      appendMessage("System", "This room already has 50 participants.", "system");
       setState("Room full");
       socket.close();
       return;
@@ -687,6 +834,7 @@
   });
 
   window.addEventListener("beforeunload", () => {
+    sendViewerStatus(false);
     if (viewerConnection) {
       viewerConnection.close();
     }

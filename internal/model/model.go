@@ -20,16 +20,29 @@ type Training struct {
 	CreatedBy   string
 }
 
+type LiveStats struct {
+	Online   int `json:"online"`
+	Watching int `json:"watching"`
+}
+
+type AdminTraining struct {
+	Training
+	LiveStats LiveStats
+}
+
 type Recording struct {
 	ID               string
 	TrainingID       string
 	ObjectName       string
 	OriginalFilename string
+	NameBase         string
 	ContentType      string
 	SizeBytes        int64
 	DurationSeconds  int
 	RecordedAt       string
 	CreatedBy        string
+	DeletedAt        string
+	DeleteAfter      string
 }
 
 type BillingCustomer struct {
@@ -110,7 +123,7 @@ type BillingPageData struct {
 
 type AdminPageData struct {
 	BasePageData
-	Trainings             []Training
+	Trainings             []AdminTraining
 	Form                  TrainingForm
 	BillingEnabled        bool
 	BillingDisabledReason string

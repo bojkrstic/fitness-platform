@@ -37,3 +37,34 @@ The repo name used by the script and deployment commands must match the Docker H
 - Recordings are stored either in the Docker volume `fitness_recordings` or in GCS.
 - If you keep local storage, the server disk will accumulate recordings over time.
 - If you use GCS, the server disk does not store the media files.
+
+For manual server deployments, use the helper script instead of typing
+`docker run` by hand:
+
+```bash
+DOCKER_IMAGE=bojankrlekrstic/fitness-platform-svc DOCKER_TAG=version1.1.5 ./deploy/run-app.sh
+```
+
+The script always mounts the host recordings directory into the container:
+
+```text
+./recordings -> /app/recordings
+```
+
+That keeps uploaded recordings outside the app container, so deleting and
+recreating `fitness-platform-app-1` does not delete local recording files.
+
+You can override the host folder if needed:
+
+```bash
+RECORDINGS_HOST_DIR=/home/krle/app/fitness-platform/recordings \
+DOCKER_IMAGE=bojankrlekrstic/fitness-platform-svc \
+DOCKER_TAG=version1.1.5 \
+./deploy/run-app.sh
+```
+
+Do not start the app container without this mount when using local storage:
+
+```text
+-v "$RECORDINGS_HOST_DIR:/app/recordings"
+```

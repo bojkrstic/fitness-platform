@@ -61,6 +61,8 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 		trainings.POST("/:id/recordings/sign-upload", h.requireAuth(), h.requireAdmin(), h.signRecordingUploadHandler)
 		trainings.PUT("/:id/recordings/uploads/:uploadID", h.requireAuth(), h.requireAdmin(), h.uploadRecordingChunkHandler)
 		trainings.POST("/:id/recordings/complete", h.requireAuth(), h.requireAdmin(), h.completeRecordingHandler)
+		trainings.POST("/:id/recordings/:recordingID/rename", h.requireAuth(), h.requireAdmin(), h.renameRecordingHandler)
+		trainings.POST("/:id/recordings/:recordingID/delete", h.requireAuth(), h.requireAdmin(), h.deleteRecordingHandler)
 		trainings.GET("/:id/recordings/:recordingID/view", h.requireAuth(), h.recordingAccessHandler(false))
 		trainings.GET("/:id/recordings/:recordingID/download", h.requireAuth(), h.recordingAccessHandler(true))
 	}
@@ -78,6 +80,7 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 	admin := router.Group("/admin", h.requireAuth(), h.requireAdmin())
 	{
 		admin.GET("/", h.adminDashboardHandler)
+		admin.GET("/live-stats", h.adminLiveStatsHandler)
 		admin.POST("/trainings", h.createTrainingHandler)
 	}
 
@@ -174,6 +177,11 @@ func (h *HttpHandler) mustCurrentUser(c *gin.Context) *model.User {
 func (h *HttpHandler) requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if _, ok := h.currentUser(c); !ok {
+			if c.Request.Method != http.MethodGet {
+				c.String(http.StatusUnauthorized, "unauthorized")
+				c.Abort()
+				return
+			}
 			target := "/auth/login?next=" + url.QueryEscape(c.Request.URL.RequestURI())
 			c.Redirect(http.StatusSeeOther, target)
 			c.Abort()
@@ -187,6 +195,11 @@ func (h *HttpHandler) requireAdmin() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		user, ok := h.currentUser(c)
 		if !ok {
+			if c.Request.Method != http.MethodGet {
+				c.String(http.StatusUnauthorized, "unauthorized")
+				c.Abort()
+				return
+			}
 			target := "/auth/login?next=" + url.QueryEscape(c.Request.URL.RequestURI())
 			c.Redirect(http.StatusSeeOther, target)
 			c.Abort()
@@ -290,6 +303,16 @@ func (h *HttpHandler) trainingRoomHandler(c *gin.Context) {
 			data.BillingDisabledReason = "Checkout je otkazan."
 		}
 	}
+	if msg := strings.TrimSpace(c.Query("recording")); msg != "" {
+		switch msg {
+		case "renamed":
+			data.SuccessMessage = "Recording renamed."
+		case "deleted":
+			data.SuccessMessage = "Recording deleted. It will be permanently removed after 2 days."
+		case "rename-empty":
+			data.SuccessMessage = "Recording name is required."
+		}
+	}
 
 	h.renderPage(c, http.StatusOK, "training_room", data)
 }
@@ -345,7 +368,7 @@ func (h *HttpHandler) completeRecordingHandler(c *gin.Context) {
 		SizeBytes:        input.SizeBytes,
 		DurationSeconds:  input.DurationSeconds,
 		CreatedBy:        user.ID,
-	})
+	}, strings.TrimSpace(input.UploadID))
 	if err != nil {
 		if errors.Is(err, service.ErrStorageDisabled) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": h.svc.RecordingStorageDisabledReason()})
@@ -389,6 +412,38 @@ func (h *HttpHandler) uploadRecordingChunkHandler(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+func (h *HttpHandler) renameRecordingHandler(c *gin.Context) {
+	filename := strings.TrimSpace(c.PostForm("filename"))
+	if filename == "" {
+		c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=rename-empty")
+		return
+	}
+
+	if _, err := h.svc.RenameRecording(c.Request.Context(), c.Param("id"), c.Param("recordingID"), filename); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=renamed")
+}
+
+func (h *HttpHandler) deleteRecordingHandler(c *gin.Context) {
+	if _, err := h.svc.DeleteRecording(c.Request.Context(), c.Param("id"), c.Param("recordingID")); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=deleted")
 }
 
 func (h *HttpHandler) recordingAccessHandler(download bool) gin.HandlerFunc {
@@ -548,17 +603,62 @@ func (h *HttpHandler) adminDashboardHandler(c *gin.Context) {
 		c.String(http.StatusInternalServerError, err.Error())
 		return
 	}
+	adminTrainings := h.adminTrainingsWithLiveStats(trainings)
 
 	h.renderPage(c, http.StatusOK, "admin", model.AdminPageData{
 		BasePageData: model.BasePageData{
 			CurrentUser: h.mustCurrentUser(c),
 			Success:     map[string]string{"1": "Trening je kreiran."}[c.Query("created")],
 		},
-		Trainings:             trainings,
+		Trainings:             adminTrainings,
 		BillingEnabled:        h.svc.BillingEnabled(),
 		BillingDisabledReason: h.svc.BillingDisabledReason(),
 		StripePriceID:         h.cfg.Billing.StripePriceID,
 	})
+}
+
+func (h *HttpHandler) adminLiveStatsHandler(c *gin.Context) {
+	trainings, err := h.svc.HomeTrainings(c.Request.Context())
+	if err != nil {
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	roomIDs := make([]string, 0, len(trainings))
+	for _, training := range trainings {
+		roomIDs = append(roomIDs, training.ID)
+	}
+	stats := h.hub.Stats(roomIDs)
+
+	response := make(map[string]model.LiveStats, len(stats))
+	for roomID, stat := range stats {
+		response[roomID] = model.LiveStats{
+			Online:   stat.Online,
+			Watching: stat.Watching,
+		}
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func (h *HttpHandler) adminTrainingsWithLiveStats(trainings []model.Training) []model.AdminTraining {
+	roomIDs := make([]string, 0, len(trainings))
+	for _, training := range trainings {
+		roomIDs = append(roomIDs, training.ID)
+	}
+	stats := h.hub.Stats(roomIDs)
+
+	adminTrainings := make([]model.AdminTraining, 0, len(trainings))
+	for _, training := range trainings {
+		stat := stats[training.ID]
+		adminTrainings = append(adminTrainings, model.AdminTraining{
+			Training: training,
+			LiveStats: model.LiveStats{
+				Online:   stat.Online,
+				Watching: stat.Watching,
+			},
+		})
+	}
+	return adminTrainings
 }
 
 func (h *HttpHandler) createTrainingHandler(c *gin.Context) {
@@ -582,7 +682,7 @@ func (h *HttpHandler) createTrainingHandler(c *gin.Context) {
 					CurrentUser: h.mustCurrentUser(c),
 					Error:       "Sva polja su obavezna.",
 				},
-				Trainings: trainings,
+				Trainings: h.adminTrainingsWithLiveStats(trainings),
 				Form:      input,
 			})
 			return

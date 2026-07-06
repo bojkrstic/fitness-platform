@@ -295,6 +295,7 @@ Docker hub
   Kada se napravi nova verzija, onda se pokrene ./build-and-push.sh samo se promeni verzija v1.1.2 recimo
   na taj nacin se formira izvrsna verzija i prebaci u dockerhub, na lokaciji https://app.docker.com/accounts/bojankrlekrstic
   user: bojankrlekrstic
+  pass: Bokana1974!
   bitno je da se ulogujes na dockerhub preko docker login ili Docker Hub access token-a
 
 
@@ -321,5 +322,17 @@ pre toga se pokrene ./build-and-push.sh sa novom verzijom i onda se krene dalje,
 1. docker ps
 2. docker rm -f fitness-platform-app-1
 3. docker pull bojankrlekrstic/fitness-platform-svc:version1.1.5
-4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.1.5
+<!-- 4. docker run -d --name fitness-platform-app-1 --network fitness-platform_default -p 8020:8080 --env-file .env -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" bojankrlekrstic/fitness-platform-svc:version1.1.5 -->
+
+4. docker run -d \
+    --name fitness-platform-app-1 \
+    --network fitness-platform_default \
+    -p 8020:8080 \
+    --env-file .env \
+    -e DATABASE_URL="postgres://fitness:fitness@fitness-platform-db-1:5432/fitness?sslmode=disable" \
+    -e RECORDINGS_DIR="/app/recordings" \
+    -v "$HOME/app/fitness-platform/recordings:/app/recordings" \
+    bojankrlekrstic/fitness-platform-svc:version1.1.5
+
+
 5. curl http://localhost:8020    -> ovo je test
