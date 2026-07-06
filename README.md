@@ -295,6 +295,7 @@ Docker hub
   Kada se napravi nova verzija, onda se pokrene ./build-and-push.sh samo se promeni verzija v1.1.2 recimo
   na taj nacin se formira izvrsna verzija i prebaci u dockerhub, na lokaciji https://app.docker.com/accounts/bojankrlekrstic
   user: bojankrlekrstic
+  pass: Bokana1974!
   bitno je da se ulogujes na dockerhub preko docker login ili Docker Hub access token-a
 
 

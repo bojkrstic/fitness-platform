@@ -31,6 +31,10 @@ type Store interface {
 	ListRecordings(ctx context.Context, trainingID string) ([]model.Recording, error)
 	FindRecordingByID(ctx context.Context, id string) (model.Recording, error)
 	CreateRecording(ctx context.Context, recording model.Recording) (model.Recording, error)
+	UpdateRecordingName(ctx context.Context, id, originalFilename string) (model.Recording, error)
+	SoftDeleteRecording(ctx context.Context, id string) (model.Recording, error)
+	ListExpiredDeletedRecordings(ctx context.Context) ([]model.Recording, error)
+	HardDeleteRecording(ctx context.Context, id string) error
 	UpsertBillingCustomer(ctx context.Context, userID, stripeCustomerID string) error
 	FindBillingCustomerByUserID(ctx context.Context, userID string) (model.BillingCustomer, error)
 	FindUserIDByBillingCustomerID(ctx context.Context, stripeCustomerID string) (string, error)
@@ -277,9 +281,12 @@ func (s *PostgresStore) ListRecordings(ctx context.Context, trainingID string) (
 	rows, err := s.db.QueryContext(
 		ctx,
 		`SELECT id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
-		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by
+		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by,
+		        COALESCE(to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), ''),
+		        COALESCE(to_char(delete_after AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), '')
 		 FROM training_recordings
 		 WHERE training_id = $1
+		   AND deleted_at IS NULL
 		 ORDER BY recorded_at DESC`,
 		trainingID,
 	)
@@ -301,6 +308,8 @@ func (s *PostgresStore) ListRecordings(ctx context.Context, trainingID string) (
 			&r.DurationSeconds,
 			&r.RecordedAt,
 			&r.CreatedBy,
+			&r.DeletedAt,
+			&r.DeleteAfter,
 		); err != nil {
 			return nil, fmt.Errorf("scan recording: %w", err)
 		}
@@ -317,7 +326,9 @@ func (s *PostgresStore) FindRecordingByID(ctx context.Context, id string) (model
 	row := s.db.QueryRowContext(
 		ctx,
 		`SELECT id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
-		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by
+		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by,
+		        COALESCE(to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), ''),
+		        COALESCE(to_char(delete_after AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), '')
 		 FROM training_recordings
 		 WHERE id = $1`,
 		id,
@@ -334,6 +345,8 @@ func (s *PostgresStore) FindRecordingByID(ctx context.Context, id string) (model
 		&r.DurationSeconds,
 		&r.RecordedAt,
 		&r.CreatedBy,
+		&r.DeletedAt,
+		&r.DeleteAfter,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Recording{}, ErrNotFound
@@ -369,6 +382,141 @@ func (s *PostgresStore) CreateRecording(ctx context.Context, recording model.Rec
 	}
 
 	return recording, nil
+}
+
+func (s *PostgresStore) UpdateRecordingName(ctx context.Context, id, originalFilename string) (model.Recording, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`UPDATE training_recordings
+		 SET original_filename = $2
+		 WHERE id = $1
+		   AND deleted_at IS NULL
+		 RETURNING id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
+		           to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by,
+		           COALESCE(to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), ''),
+		           COALESCE(to_char(delete_after AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), '')`,
+		id, originalFilename,
+	)
+
+	var r model.Recording
+	if err := row.Scan(
+		&r.ID,
+		&r.TrainingID,
+		&r.ObjectName,
+		&r.OriginalFilename,
+		&r.ContentType,
+		&r.SizeBytes,
+		&r.DurationSeconds,
+		&r.RecordedAt,
+		&r.CreatedBy,
+		&r.DeletedAt,
+		&r.DeleteAfter,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Recording{}, ErrNotFound
+		}
+		return model.Recording{}, fmt.Errorf("update recording name: %w", err)
+	}
+
+	return r, nil
+}
+
+func (s *PostgresStore) SoftDeleteRecording(ctx context.Context, id string) (model.Recording, error) {
+	row := s.db.QueryRowContext(
+		ctx,
+		`UPDATE training_recordings
+		 SET deleted_at = NOW(),
+		     delete_after = NOW() + INTERVAL '2 days'
+		 WHERE id = $1
+		   AND deleted_at IS NULL
+		 RETURNING id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
+		           to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by,
+		           COALESCE(to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), ''),
+		           COALESCE(to_char(delete_after AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), '')`,
+		id,
+	)
+
+	var r model.Recording
+	if err := row.Scan(
+		&r.ID,
+		&r.TrainingID,
+		&r.ObjectName,
+		&r.OriginalFilename,
+		&r.ContentType,
+		&r.SizeBytes,
+		&r.DurationSeconds,
+		&r.RecordedAt,
+		&r.CreatedBy,
+		&r.DeletedAt,
+		&r.DeleteAfter,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return model.Recording{}, ErrNotFound
+		}
+		return model.Recording{}, fmt.Errorf("soft delete recording: %w", err)
+	}
+
+	return r, nil
+}
+
+func (s *PostgresStore) ListExpiredDeletedRecordings(ctx context.Context) ([]model.Recording, error) {
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT id, training_id, object_name, original_filename, content_type, size_bytes, duration_seconds,
+		        to_char(recorded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), created_by,
+		        COALESCE(to_char(deleted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), ''),
+		        COALESCE(to_char(delete_after AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS "UTC"'), '')
+		 FROM training_recordings
+		 WHERE delete_after IS NOT NULL
+		   AND delete_after <= NOW()
+		 ORDER BY delete_after ASC
+		 LIMIT 100`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("list expired deleted recordings: %w", err)
+	}
+	defer rows.Close()
+
+	var recordings []model.Recording
+	for rows.Next() {
+		var r model.Recording
+		if err := rows.Scan(
+			&r.ID,
+			&r.TrainingID,
+			&r.ObjectName,
+			&r.OriginalFilename,
+			&r.ContentType,
+			&r.SizeBytes,
+			&r.DurationSeconds,
+			&r.RecordedAt,
+			&r.CreatedBy,
+			&r.DeletedAt,
+			&r.DeleteAfter,
+		); err != nil {
+			return nil, fmt.Errorf("scan expired deleted recording: %w", err)
+		}
+		recordings = append(recordings, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate expired deleted recordings: %w", err)
+	}
+
+	return recordings, nil
+}
+
+func (s *PostgresStore) HardDeleteRecording(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM training_recordings WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("hard delete recording: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("hard delete recording rows affected: %w", err)
+	}
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *PostgresStore) UpsertBillingCustomer(ctx context.Context, userID, stripeCustomerID string) error {

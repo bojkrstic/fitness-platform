@@ -61,6 +61,8 @@ func NewHttpHandler(svc *service.Service, cfg config.Config) *HttpHandler {
 		trainings.POST("/:id/recordings/sign-upload", h.requireAuth(), h.requireAdmin(), h.signRecordingUploadHandler)
 		trainings.PUT("/:id/recordings/uploads/:uploadID", h.requireAuth(), h.requireAdmin(), h.uploadRecordingChunkHandler)
 		trainings.POST("/:id/recordings/complete", h.requireAuth(), h.requireAdmin(), h.completeRecordingHandler)
+		trainings.POST("/:id/recordings/:recordingID/rename", h.requireAuth(), h.requireAdmin(), h.renameRecordingHandler)
+		trainings.POST("/:id/recordings/:recordingID/delete", h.requireAuth(), h.requireAdmin(), h.deleteRecordingHandler)
 		trainings.GET("/:id/recordings/:recordingID/view", h.requireAuth(), h.recordingAccessHandler(false))
 		trainings.GET("/:id/recordings/:recordingID/download", h.requireAuth(), h.recordingAccessHandler(true))
 	}
@@ -301,6 +303,16 @@ func (h *HttpHandler) trainingRoomHandler(c *gin.Context) {
 			data.BillingDisabledReason = "Checkout je otkazan."
 		}
 	}
+	if msg := strings.TrimSpace(c.Query("recording")); msg != "" {
+		switch msg {
+		case "renamed":
+			data.SuccessMessage = "Recording renamed."
+		case "deleted":
+			data.SuccessMessage = "Recording deleted. It will be permanently removed after 2 days."
+		case "rename-empty":
+			data.SuccessMessage = "Recording name is required."
+		}
+	}
 
 	h.renderPage(c, http.StatusOK, "training_room", data)
 }
@@ -400,6 +412,38 @@ func (h *HttpHandler) uploadRecordingChunkHandler(c *gin.Context) {
 	}
 
 	c.Status(http.StatusNoContent)
+}
+
+func (h *HttpHandler) renameRecordingHandler(c *gin.Context) {
+	filename := strings.TrimSpace(c.PostForm("filename"))
+	if filename == "" {
+		c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=rename-empty")
+		return
+	}
+
+	if _, err := h.svc.RenameRecording(c.Request.Context(), c.Param("id"), c.Param("recordingID"), filename); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=renamed")
+}
+
+func (h *HttpHandler) deleteRecordingHandler(c *gin.Context) {
+	if _, err := h.svc.DeleteRecording(c.Request.Context(), c.Param("id"), c.Param("recordingID")); err != nil {
+		if errors.Is(err, repository.ErrNotFound) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		c.String(http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	c.Redirect(http.StatusSeeOther, "/trainings/"+c.Param("id")+"?recording=deleted")
 }
 
 func (h *HttpHandler) recordingAccessHandler(download bool) gin.HandlerFunc {

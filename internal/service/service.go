@@ -22,6 +22,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"fitnes-platform/internal/config"
 	"fitnes-platform/internal/model"
@@ -49,6 +50,8 @@ type Service struct {
 	billing           config.Billing
 	localUploads      map[string]*localRecordingUpload
 	localUploadsMu    sync.Mutex
+	purgeStop         chan struct{}
+	purgeStopOnce     sync.Once
 }
 
 func New(store repository.Store, cfg config.Config) *Service {
@@ -59,6 +62,7 @@ func New(store repository.Store, cfg config.Config) *Service {
 		recordingStorage:  cfg.RecordingStorage,
 		billing:           cfg.Billing,
 		localUploads:      map[string]*localRecordingUpload{},
+		purgeStop:         make(chan struct{}),
 	}
 }
 
@@ -115,10 +119,18 @@ func (s *Service) Init(ctx context.Context) error {
 		return err
 	}
 
+	if err := s.PurgeExpiredDeletedRecordings(ctx); err != nil {
+		log.Printf("purge expired recordings: %v", err)
+	}
+	go s.runRecordingPurgeLoop()
+
 	return nil
 }
 
 func (s *Service) Close() error {
+	s.purgeStopOnce.Do(func() {
+		close(s.purgeStop)
+	})
 	return s.store.Close()
 }
 
@@ -139,7 +151,39 @@ func (s *Service) Training(ctx context.Context, id string) (model.Training, erro
 }
 
 func (s *Service) Recordings(ctx context.Context, trainingID string) ([]model.Recording, error) {
-	return s.store.ListRecordings(ctx, trainingID)
+	recordings, err := s.store.ListRecordings(ctx, trainingID)
+	if err != nil {
+		return nil, err
+	}
+	for i := range recordings {
+		recordings[i].NameBase = recordingNameBase(recordings[i].OriginalFilename)
+	}
+	return recordings, nil
+}
+
+func (s *Service) RenameRecording(ctx context.Context, trainingID, recordingID, filename string) (model.Recording, error) {
+	recording, err := s.store.FindRecordingByID(ctx, recordingID)
+	if err != nil {
+		return model.Recording{}, err
+	}
+	if recording.TrainingID != trainingID || recording.DeletedAt != "" {
+		return model.Recording{}, repository.ErrNotFound
+	}
+
+	filename = safeRecordingFilenameFromBase(filename, recording.ID)
+	return s.store.UpdateRecordingName(ctx, recording.ID, filename)
+}
+
+func (s *Service) DeleteRecording(ctx context.Context, trainingID, recordingID string) (model.Recording, error) {
+	recording, err := s.store.FindRecordingByID(ctx, recordingID)
+	if err != nil {
+		return model.Recording{}, err
+	}
+	if recording.TrainingID != trainingID || recording.DeletedAt != "" {
+		return model.Recording{}, repository.ErrNotFound
+	}
+
+	return s.store.SoftDeleteRecording(ctx, recording.ID)
 }
 
 func (s *Service) Login(ctx context.Context, email, password string) (model.User, error) {
@@ -359,7 +403,7 @@ func (s *Service) RecordingAccess(ctx context.Context, trainingID, recordingID s
 	if err != nil {
 		return RecordingAccess{}, err
 	}
-	if recording.TrainingID != trainingID {
+	if recording.TrainingID != trainingID || recording.DeletedAt != "" {
 		return RecordingAccess{}, repository.ErrNotFound
 	}
 
@@ -389,6 +433,69 @@ func (s *Service) RecordingAccess(ctx context.Context, trainingID, recordingID s
 		AccessURL: accessURL,
 		Mode:      "gcs",
 	}, nil
+}
+
+func (s *Service) runRecordingPurgeLoop() {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.PurgeExpiredDeletedRecordings(context.Background()); err != nil {
+				log.Printf("purge expired recordings: %v", err)
+			}
+		case <-s.purgeStop:
+			return
+		}
+	}
+}
+
+func (s *Service) PurgeExpiredDeletedRecordings(ctx context.Context) error {
+	recordings, err := s.store.ListExpiredDeletedRecordings(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, recording := range recordings {
+		if err := s.deleteRecordingObject(ctx, recording.ObjectName); err != nil {
+			log.Printf("delete recording object %s: %v", recording.ObjectName, err)
+			continue
+		}
+		if err := s.store.HardDeleteRecording(ctx, recording.ID); err != nil && err != repository.ErrNotFound {
+			log.Printf("hard delete recording %s: %v", recording.ID, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) deleteRecordingObject(ctx context.Context, objectName string) error {
+	if s.recordingStorage.UsesGCS() {
+		deleteURL, err := s.signStorageURL("DELETE", objectName, nil, nil, time.Now().UTC().Add(15*time.Minute))
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
+		if err != nil {
+			return fmt.Errorf("create storage delete request: %w", err)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("delete storage object: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent && resp.StatusCode != http.StatusNotFound {
+			return fmt.Errorf("delete storage object: status %d", resp.StatusCode)
+		}
+		return nil
+	}
+
+	filePath := filepath.Join(s.recordingStorage.LocalDir, filepath.FromSlash(objectName))
+	if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete local recording: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) RecordingUploadChunk(ctx context.Context, trainingID, uploadID, contentRange string, body []byte) error {
@@ -778,28 +885,36 @@ func normalizeRecordingContentType(contentType string) string {
 
 func safeRecordingFilename(filename, fallbackID string) string {
 	filename = strings.TrimSpace(path.Base(filename))
+	filename = strings.TrimSuffix(filename, ".webm")
+	filename = strings.TrimSuffix(filename, ".WEBM")
+	return safeRecordingFilenameFromBase(filename, fallbackID)
+}
+
+func safeRecordingFilenameFromBase(filename, fallbackID string) string {
+	filename = recordingNameBase(filename)
 	filename = strings.Map(func(r rune) rune {
 		switch {
-		case r >= 'a' && r <= 'z':
+		case unicode.IsLetter(r), unicode.IsDigit(r):
 			return r
-		case r >= 'A' && r <= 'Z':
-			return r
-		case r >= '0' && r <= '9':
-			return r
-		case r == '.', r == '-', r == '_':
+		case r == '-', r == '_', r == ' ', r == '(', r == ')':
 			return r
 		default:
 			return '-'
 		}
 	}, filename)
-	filename = strings.Trim(filename, ".-")
+	filename = strings.Trim(filename, " -_")
 	if filename == "" {
-		filename = fallbackID + ".webm"
+		filename = fallbackID
 	}
-	if !strings.HasSuffix(strings.ToLower(filename), ".webm") {
-		filename += ".webm"
+	return filename + ".webm"
+}
+
+func recordingNameBase(filename string) string {
+	filename = strings.TrimSpace(path.Base(filename))
+	if strings.HasSuffix(strings.ToLower(filename), ".webm") {
+		filename = filename[:len(filename)-len(".webm")]
 	}
-	return filename
+	return strings.TrimSpace(filename)
 }
 
 func parseRSAPrivateKey(value string) (*rsa.PrivateKey, error) {

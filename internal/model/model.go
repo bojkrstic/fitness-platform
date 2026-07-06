@@ -35,11 +35,14 @@ type Recording struct {
 	TrainingID       string
 	ObjectName       string
 	OriginalFilename string
+	NameBase         string
 	ContentType      string
 	SizeBytes        int64
 	DurationSeconds  int
 	RecordedAt       string
 	CreatedBy        string
+	DeletedAt        string
+	DeleteAfter      string
 }
 
 type BillingCustomer struct {

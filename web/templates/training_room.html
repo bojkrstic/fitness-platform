@@ -58,7 +58,25 @@
             <div class="meta">
               <a class="button secondary" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/view" target="_blank" rel="noopener">View</a>
               <a class="button" href="/trainings/{{.TrainingID}}/recordings/{{.ID}}/download">Download</a>
+              {{if eq $.CurrentUser.Role "admin"}}
+                <button class="button secondary" type="button" onclick="document.getElementById('rename-{{.ID}}').hidden = !document.getElementById('rename-{{.ID}}').hidden">Rename</button>
+                <form method="post" action="/trainings/{{.TrainingID}}/recordings/{{.ID}}/delete" style="display:inline;" onsubmit="return confirm('Delete this recording? It will be hidden now and permanently removed after 2 days.');">
+                  <button class="button secondary" type="submit">Delete</button>
+                </form>
+              {{end}}
             </div>
+            {{if eq $.CurrentUser.Role "admin"}}
+              <form id="rename-{{.ID}}" class="meta" method="post" action="/trainings/{{.TrainingID}}/recordings/{{.ID}}/rename" style="margin-top:12px;" hidden>
+                <label style="flex:1; min-width:180px;">
+                  Name
+                  <span class="meta" style="gap:8px;">
+                    <input name="filename" value="{{.NameBase}}" required />
+                    <span class="chip">.webm</span>
+                  </span>
+                </label>
+                <button class="button secondary" type="submit">Save</button>
+              </form>
+            {{end}}
           </div>
         {{end}}
       </div>

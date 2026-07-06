@@ -47,6 +47,11 @@ recordings/YYYY/MM/DD/{training_id}/{recording_id}.webm
 - `Stop & upload` finalizes the file and saves metadata.
 - `View` opens the file in the browser.
 - `Download` forces a download.
+- Admin can rename a recording from the training page. This changes the
+  displayed/download filename metadata, not the physical object path.
+- Admin can delete a recording from the training page. Deleted recordings are
+  hidden immediately, kept in the database and storage for 2 days, then purged
+  automatically.
 
 ## CORS for GCS
 
@@ -71,6 +76,6 @@ gcloud storage buckets update gs://fitness-recordings-bucket --cors-file=cors.js
 
 ## Cleanup
 
-- There is no automatic retention yet.
-- Local storage will grow on the server until files are removed manually or retention is added.
-- GCS storage will also grow until lifecycle rules are added.
+- Recordings deleted by admin are retained for 2 days and then automatically
+  removed from storage and the database.
+- Active recordings remain until an admin deletes them.
