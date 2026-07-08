@@ -326,7 +326,13 @@ func (h *HttpHandler) signRecordingUploadHandler(c *gin.Context) {
 		return
 	}
 
-	upload, err := h.svc.SignRecordingUpload(c.Request.Context(), c.Param("id"), input.ContentType)
+	user := h.mustCurrentUser(c)
+	if user == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	upload, err := h.svc.SignRecordingUpload(c.Request.Context(), c.Param("id"), input.ContentType, user.ID)
 	if err != nil {
 		if errors.Is(err, service.ErrStorageDisabled) {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": h.svc.RecordingStorageDisabledReason()})
@@ -402,7 +408,7 @@ func (h *HttpHandler) uploadRecordingChunkHandler(c *gin.Context) {
 		return
 	}
 
-	if err := h.svc.UploadLocalRecordingChunk(c.Param("id"), c.Param("uploadID"), c.GetHeader("Content-Range"), body); err != nil {
+	if err := h.svc.UploadLocalRecordingChunk(c.Request.Context(), c.Param("id"), c.Param("uploadID"), c.GetHeader("Content-Range"), body); err != nil {
 		if errors.Is(err, repository.ErrNotFound) {
 			c.Status(http.StatusNotFound)
 			return

@@ -90,7 +90,10 @@ type localRecordingUpload struct {
 	objectName  string
 	filePath    string
 	contentType string
+	createdBy   string
 	sizeBytes   int64
+	final       bool
+	finalAt     time.Time
 }
 
 type localRecordingUploadMetadata struct {
@@ -99,7 +102,10 @@ type localRecordingUploadMetadata struct {
 	RecordingID string `json:"recordingId"`
 	ObjectName  string `json:"objectName"`
 	ContentType string `json:"contentType"`
+	CreatedBy   string `json:"createdBy,omitempty"`
 	SizeBytes   int64  `json:"sizeBytes"`
+	Final       bool   `json:"final,omitempty"`
+	FinalAt     string `json:"finalAt,omitempty"`
 }
 
 func (s *Service) Init(ctx context.Context) error {
@@ -122,7 +128,11 @@ func (s *Service) Init(ctx context.Context) error {
 	if err := s.PurgeExpiredDeletedRecordings(ctx); err != nil {
 		log.Printf("purge expired recordings: %v", err)
 	}
+	if err := s.RecoverFinalLocalUploads(ctx, 2*time.Minute); err != nil {
+		log.Printf("recover final local uploads: %v", err)
+	}
 	go s.runRecordingPurgeLoop()
+	go s.runLocalUploadRecoveryLoop()
 
 	return nil
 }
@@ -260,9 +270,13 @@ func (s *Service) RecordingStorageModeLabel() string {
 	return s.recordingStorage.ModeLabel()
 }
 
-func (s *Service) SignRecordingUpload(ctx context.Context, trainingID, contentType string) (RecordingUpload, error) {
+func (s *Service) SignRecordingUpload(ctx context.Context, trainingID, contentType, createdBy string) (RecordingUpload, error) {
 	if _, err := s.store.FindTrainingByID(ctx, trainingID); err != nil {
 		return RecordingUpload{}, err
+	}
+	createdBy = strings.TrimSpace(createdBy)
+	if createdBy == "" {
+		return RecordingUpload{}, ErrInvalidRecording
 	}
 
 	contentType = normalizeRecordingContentType(contentType)
@@ -315,6 +329,7 @@ func (s *Service) SignRecordingUpload(ctx context.Context, trainingID, contentTy
 		objectName:  objectName,
 		filePath:    filePath,
 		contentType: contentType,
+		createdBy:   createdBy,
 	}
 	if err := s.saveLocalUploadSession(session); err != nil {
 		return RecordingUpload{}, err
@@ -502,8 +517,7 @@ func (s *Service) RecordingUploadChunk(ctx context.Context, trainingID, uploadID
 	if s.recordingStorage.UsesGCS() {
 		return fmt.Errorf("recording upload chunk only applies to local storage")
 	}
-	_ = ctx
-	return s.UploadLocalRecordingChunk(trainingID, uploadID, contentRange, body)
+	return s.UploadLocalRecordingChunk(ctx, trainingID, uploadID, contentRange, body)
 }
 
 func (s *Service) localUploadPath(uploadID string) (string, error) {
@@ -548,7 +562,12 @@ func (s *Service) saveLocalUploadSession(session *localRecordingUpload) error {
 		RecordingID: session.recordingID,
 		ObjectName:  session.objectName,
 		ContentType: session.contentType,
+		CreatedBy:   session.createdBy,
 		SizeBytes:   session.sizeBytes,
+		Final:       session.final,
+	}
+	if !session.finalAt.IsZero() {
+		metadata.FinalAt = session.finalAt.UTC().Format(time.RFC3339)
 	}
 	body, err := json.Marshal(metadata)
 	if err != nil {
@@ -584,6 +603,14 @@ func (s *Service) loadLocalUploadSession(uploadID string) (*localRecordingUpload
 	if metadata.UploadID != uploadID || metadata.TrainingID == "" || metadata.RecordingID == "" || metadata.ObjectName == "" || metadata.SizeBytes < 0 {
 		return nil, fmt.Errorf("invalid local upload metadata")
 	}
+	var finalAt time.Time
+	if metadata.FinalAt != "" {
+		parsedFinalAt, err := time.Parse(time.RFC3339, metadata.FinalAt)
+		if err != nil {
+			return nil, fmt.Errorf("invalid local upload metadata")
+		}
+		finalAt = parsedFinalAt
+	}
 
 	filePath, err := s.localUploadPath(uploadID)
 	if err != nil {
@@ -597,7 +624,10 @@ func (s *Service) loadLocalUploadSession(uploadID string) (*localRecordingUpload
 		objectName:  metadata.ObjectName,
 		filePath:    filePath,
 		contentType: metadata.ContentType,
+		createdBy:   metadata.CreatedBy,
 		sizeBytes:   metadata.SizeBytes,
+		final:       metadata.Final,
+		finalAt:     finalAt,
 	}, nil
 }
 
@@ -625,8 +655,8 @@ func (s *Service) localUploadSession(uploadID string) (*localRecordingUpload, er
 	return session, nil
 }
 
-func (s *Service) UploadLocalRecordingChunk(trainingID, uploadID string, contentRange string, body []byte) error {
-	start, end, total, _, err := parseContentRange(contentRange)
+func (s *Service) UploadLocalRecordingChunk(ctx context.Context, trainingID, uploadID string, contentRange string, body []byte) error {
+	start, end, total, final, err := parseContentRange(contentRange)
 	if err != nil {
 		return err
 	}
@@ -664,10 +694,119 @@ func (s *Service) UploadLocalRecordingChunk(trainingID, uploadID string, content
 		return fmt.Errorf("write upload chunk: %w", err)
 	}
 	session.sizeBytes = int64(end + 1)
+	if final {
+		session.final = true
+		session.finalAt = time.Now().UTC()
+	}
 	if err := s.saveLocalUploadSession(session); err != nil {
 		return err
 	}
+	if final {
+		go s.recoverFinalLocalUploadAfterDelay(context.Background(), uploadID, 2*time.Minute)
+		_ = ctx
+	}
 
+	return nil
+}
+
+func (s *Service) runLocalUploadRecoveryLoop() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := s.RecoverFinalLocalUploads(context.Background(), 2*time.Minute); err != nil {
+				log.Printf("recover final local uploads: %v", err)
+			}
+		case <-s.purgeStop:
+			return
+		}
+	}
+}
+
+func (s *Service) recoverFinalLocalUploadAfterDelay(ctx context.Context, uploadID string, delay time.Duration) {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-timer.C:
+	case <-s.purgeStop:
+		return
+	case <-ctx.Done():
+		return
+	}
+
+	if err := s.RecoverFinalLocalUpload(ctx, uploadID, delay); err != nil {
+		log.Printf("recover final local upload upload=%s: %v", uploadID, err)
+	}
+}
+
+func (s *Service) RecoverFinalLocalUploads(ctx context.Context, minAge time.Duration) error {
+	if s.recordingStorage.UsesGCS() {
+		return nil
+	}
+
+	dir := filepath.Join(s.recordingStorage.LocalDir, ".uploads")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("read local uploads: %w", err)
+	}
+
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		uploadID := strings.TrimSuffix(entry.Name(), ".json")
+		if err := s.RecoverFinalLocalUpload(ctx, uploadID, minAge); err != nil {
+			log.Printf("recover final local upload upload=%s: %v", uploadID, err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) RecoverFinalLocalUpload(ctx context.Context, uploadID string, minAge time.Duration) error {
+	session, err := s.localUploadSession(uploadID)
+	if err != nil {
+		return err
+	}
+	if !session.final {
+		return nil
+	}
+	if session.createdBy == "" {
+		return nil
+	}
+	if !session.finalAt.IsZero() && time.Since(session.finalAt) < minAge {
+		return nil
+	}
+
+	info, err := os.Stat(session.filePath)
+	if err != nil {
+		return fmt.Errorf("stat local upload: %w", err)
+	}
+	if info.IsDir() || info.Size() != session.sizeBytes {
+		return nil
+	}
+
+	_, err = s.CompleteRecording(ctx, model.Recording{
+		ID:               session.recordingID,
+		TrainingID:       session.trainingID,
+		ObjectName:       session.objectName,
+		OriginalFilename: safeRecordingFilename("", session.recordingID),
+		ContentType:      session.contentType,
+		SizeBytes:        session.sizeBytes,
+		DurationSeconds:  0,
+		CreatedBy:        session.createdBy,
+	}, session.uploadID)
+	if err != nil {
+		return err
+	}
+
+	log.Printf("recovered local recording upload=%s recording=%s training=%s size=%d", session.uploadID, session.recordingID, session.trainingID, session.sizeBytes)
 	return nil
 }
 

@@ -119,6 +119,8 @@
   let localStream = null;
   let viewerConnection = null;
   let broadcasterId = null;
+  let previousBroadcasterId = null;
+  let isBroadcaster = false;
   let missingTurnNoticeShown = false;
   let lastSentWatching = false;
   let mediaRecorder = null;
@@ -184,15 +186,25 @@
   }
 
   function setupVideoLayout() {
-    if (isAdmin) {
+    if (isAdmin && isBroadcaster) {
       remoteVideo.style.display = "none";
+      localVideo.style.display = "";
+      if (recordStartButton) recordStartButton.hidden = false;
+      if (recordStopButton) recordStopButton.hidden = false;
+      if (recordRetrySaveButton && !recordingSavePending) recordRetrySaveButton.hidden = true;
     } else {
       localVideo.style.display = "none";
+      remoteVideo.style.display = "";
+      if (isAdmin) {
+        if (recordStartButton) recordStartButton.hidden = true;
+        if (recordStopButton) recordStopButton.hidden = true;
+        if (recordRetrySaveButton) recordRetrySaveButton.hidden = true;
+      }
     }
   }
 
   function activeVideo() {
-    return isAdmin ? localVideo : remoteVideo;
+    return isAdmin && isBroadcaster ? localVideo : remoteVideo;
   }
 
   function updateFullscreenButtonLabel() {
@@ -229,7 +241,7 @@
   }
 
   async function startRecording() {
-    if (!isAdmin) return;
+    if (!isAdmin || !isBroadcaster) return;
     if (!window.MediaRecorder) {
       appendMessage("System", "This browser does not support video recording.", "system");
       return;
@@ -560,6 +572,16 @@
     return viewerConnection;
   }
 
+  function closeViewerConnection() {
+    if (viewerConnection) {
+      viewerConnection.close();
+      viewerConnection = null;
+    }
+    pendingViewerIce.length = 0;
+    remoteVideo.srcObject = null;
+    sendViewerStatus(false);
+  }
+
   function ensureBroadcasterConnection(viewerId) {
     const existing = broadcasterConnections.get(viewerId);
     if (existing) return existing;
@@ -643,14 +665,23 @@
 
     updateViewerStats();
 
-    const admin = participants.find((participant) => participant.role === "admin");
-    broadcasterId = admin ? admin.id : null;
+    const broadcaster = participants.find((participant) => participant.broadcasting);
+    broadcasterId = broadcaster ? broadcaster.id : null;
+    isBroadcaster = isAdmin && broadcasterId === myClientId;
+    if (previousBroadcasterId && previousBroadcasterId !== broadcasterId) {
+      closeViewerConnection();
+    }
+    if (isBroadcaster) {
+      closeViewerConnection();
+    }
+    previousBroadcasterId = broadcasterId;
+    setupVideoLayout();
 
-    if (!isAdmin) {
+    if (!isBroadcaster) {
       if (!broadcasterId) {
         sendViewerStatus(false);
       }
-      setState(broadcasterId ? "Waiting for stream" : "Waiting for admin");
+      setState(broadcasterId ? "Waiting for stream" : "Waiting for live admin");
       if (broadcasterId && !hasTurnServer && !missingTurnNoticeShown) {
         missingTurnNoticeShown = true;
         appendMessage("System", "Video between different networks needs a TURN server. Current setup has only STUN.", "system");
@@ -789,7 +820,7 @@
     }
 
     if (msg.type === "signal") {
-      if (isAdmin) {
+      if (isBroadcaster) {
         const pc = broadcasterConnections.get(msg.senderId);
         const queue = broadcasterIceQueue(msg.senderId);
         if (msg.signalType === "answer") {

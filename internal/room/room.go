@@ -31,8 +31,9 @@ type Hub struct {
 }
 
 type Room struct {
-	clients  map[*Client]struct{}
-	messages []Message
+	clients       map[*Client]struct{}
+	messages      []Message
+	broadcasterID string
 }
 
 type Client struct {
@@ -47,10 +48,11 @@ type Client struct {
 }
 
 type Participant struct {
-	ID       string `json:"id"`
-	Email    string `json:"email"`
-	Role     string `json:"role"`
-	Watching bool   `json:"watching"`
+	ID           string `json:"id"`
+	Email        string `json:"email"`
+	Role         string `json:"role"`
+	Watching     bool   `json:"watching"`
+	Broadcasting bool   `json:"broadcasting"`
 }
 
 type Stats struct {
@@ -59,18 +61,19 @@ type Stats struct {
 }
 
 type Message struct {
-	Type         string          `json:"type"`
-	Text         string          `json:"text,omitempty"`
-	SignalType   string          `json:"signalType,omitempty"`
-	Data         json.RawMessage `json:"data,omitempty"`
-	SenderID     string          `json:"senderId,omitempty"`
-	SenderEmail  string          `json:"senderEmail,omitempty"`
-	TargetID     string          `json:"targetId,omitempty"`
-	Participants []Participant   `json:"participants,omitempty"`
-	History      []Message       `json:"history,omitempty"`
-	ClientID     string          `json:"clientId,omitempty"`
-	Timestamp    string          `json:"timestamp,omitempty"`
-	Watching     bool            `json:"watching,omitempty"`
+	Type          string          `json:"type"`
+	Text          string          `json:"text,omitempty"`
+	SignalType    string          `json:"signalType,omitempty"`
+	Data          json.RawMessage `json:"data,omitempty"`
+	SenderID      string          `json:"senderId,omitempty"`
+	SenderEmail   string          `json:"senderEmail,omitempty"`
+	TargetID      string          `json:"targetId,omitempty"`
+	Participants  []Participant   `json:"participants,omitempty"`
+	History       []Message       `json:"history,omitempty"`
+	ClientID      string          `json:"clientId,omitempty"`
+	BroadcasterID string          `json:"broadcasterId,omitempty"`
+	Timestamp     string          `json:"timestamp,omitempty"`
+	Watching      bool            `json:"watching,omitempty"`
 }
 
 func NewHub() *Hub {
@@ -129,6 +132,10 @@ func (h *Hub) Join(roomID string, c *Client) ([]Participant, []Message, error) {
 	}
 
 	room.clients[c] = struct{}{}
+	if c.user.Role == "admin" && room.broadcasterID == "" {
+		room.broadcasterID = c.id
+		log.Printf("room=%s broadcaster assigned user=%s client=%s", roomID, c.user.Email, c.id)
+	}
 	log.Printf("room=%s join user=%s client=%s participants=%d", roomID, c.user.Email, c.id, len(room.clients))
 	return room.snapshotParticipants(), room.snapshotHistory(), nil
 }
@@ -143,6 +150,12 @@ func (h *Hub) Leave(roomID string, c *Client) []Participant {
 	}
 
 	delete(room.clients, c)
+	if room.broadcasterID == c.id {
+		room.broadcasterID = room.nextAdminBroadcasterID()
+		if room.broadcasterID != "" {
+			log.Printf("room=%s broadcaster reassigned client=%s", roomID, room.broadcasterID)
+		}
+	}
 	if len(room.clients) == 0 {
 		delete(h.rooms, roomID)
 		log.Printf("room=%s leave user=%s client=%s participants=0", roomID, c.user.Email, c.id)
@@ -309,10 +322,11 @@ func (r *Room) snapshotParticipants() []Participant {
 	participants := make([]Participant, 0, len(r.clients))
 	for client := range r.clients {
 		participants = append(participants, Participant{
-			ID:       client.id,
-			Email:    client.user.Email,
-			Role:     client.user.Role,
-			Watching: client.watching,
+			ID:           client.id,
+			Email:        client.user.Email,
+			Role:         client.user.Role,
+			Watching:     client.watching,
+			Broadcasting: client.id == r.broadcasterID,
 		})
 	}
 
@@ -320,6 +334,20 @@ func (r *Room) snapshotParticipants() []Participant {
 		return participants[i].ID < participants[j].ID
 	})
 	return participants
+}
+
+func (r *Room) nextAdminBroadcasterID() string {
+	var adminIDs []string
+	for client := range r.clients {
+		if client.user.Role == "admin" {
+			adminIDs = append(adminIDs, client.id)
+		}
+	}
+	sort.Strings(adminIDs)
+	if len(adminIDs) == 0 {
+		return ""
+	}
+	return adminIDs[0]
 }
 
 func (r *Room) snapshotHistory() []Message {

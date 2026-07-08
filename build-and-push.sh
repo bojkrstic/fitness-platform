@@ -2,7 +2,7 @@
 set -euo pipefail
 
 IMAGE="${DOCKER_IMAGE:-bojankrlekrstic/fitness-platform-svc}"
-TAG="${DOCKER_TAG:-version1.0.11}"
+TAG="${DOCKER_TAG:-version1.0.12}"
 FULL_IMAGE="${IMAGE}:${TAG}"
 NAMESPACE="${IMAGE%%/*}"
 
