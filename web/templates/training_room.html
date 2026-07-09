@@ -32,6 +32,7 @@
     <div class="meta">
       <button id="video-fullscreen" class="button" type="button">Full screen</button>
       {{if eq .CurrentUser.Role "admin"}}
+        <button id="camera-toggle" class="button secondary" type="button">Turn camera on</button>
         <button id="record-start" class="button" type="button" {{if not .RecordingEnabled}}disabled{{end}}>Start recording</button>
         <button id="record-stop" class="button secondary" type="button" disabled>Stop & upload</button>
         <button id="record-retry-save" class="button secondary" type="button" hidden disabled>Retry save</button>
@@ -47,7 +48,7 @@
     </div>
   </section>
 
-  <section class="card stack">
+  <section id="recordings-section" class="card stack">
     <div class="label">Recordings</div>
     {{if .Recordings}}
       <div class="stack">
@@ -101,12 +102,14 @@
   const localVideo = document.getElementById("local-video");
   const remoteVideo = document.getElementById("remote-video");
   const fullscreenButton = document.getElementById("video-fullscreen");
+  const cameraToggleButton = document.getElementById("camera-toggle");
   const recordStartButton = document.getElementById("record-start");
   const recordStopButton = document.getElementById("record-stop");
   const recordRetrySaveButton = document.getElementById("record-retry-save");
   const stateBadge = document.getElementById("video-state");
   const viewerCountBadge = document.getElementById("viewer-count");
   const recordStateBadge = document.getElementById("record-state");
+  const recordingsSection = document.getElementById("recordings-section");
   const iceServers = {{json .ICEServers}};
   const hasTurnServer = iceServers.some((server) => {
     const urls = Array.isArray(server.urls) ? server.urls : [server.urls];
@@ -137,6 +140,16 @@
   const recordingChunkAlignment = 256 * 1024;
   const recordingUploadTargetSize = 8 * 1024 * 1024;
   const recordingCompleteMaxAttempts = 4;
+  const recordingVideoBitsPerSecond = 1400000;
+  const recordingAudioBitsPerSecond = 64000;
+  const adminMediaConstraints = {
+    video: {
+      width: { ideal: 1280, max: 1280 },
+      height: { ideal: 720, max: 720 },
+      frameRate: { ideal: 24, max: 24 },
+    },
+    audio: true,
+  };
   const broadcasterConnections = new Map();
   const pendingViewerIce = [];
   const pendingBroadcasterIce = new Map();
@@ -185,17 +198,22 @@
     recordStateBadge.textContent = value;
   }
 
+  function setRecordingIndicator(active) {
+    if (!recordStartButton) return;
+    recordStartButton.classList.toggle("recording-active", active);
+  }
+
   function setupVideoLayout() {
     if (isAdmin && isBroadcaster) {
       remoteVideo.style.display = "none";
       localVideo.style.display = "";
-      if (recordStartButton) recordStartButton.hidden = false;
-      if (recordStopButton) recordStopButton.hidden = false;
+      if (cameraToggleButton) cameraToggleButton.hidden = false;
       if (recordRetrySaveButton && !recordingSavePending) recordRetrySaveButton.hidden = true;
     } else {
       localVideo.style.display = "none";
       remoteVideo.style.display = "";
       if (isAdmin) {
+        if (cameraToggleButton) cameraToggleButton.hidden = true;
         if (recordStartButton) recordStartButton.hidden = true;
         if (recordStopButton) recordStopButton.hidden = true;
         if (recordRetrySaveButton) recordRetrySaveButton.hidden = true;
@@ -209,6 +227,26 @@
 
   function updateFullscreenButtonLabel() {
     fullscreenButton.textContent = document.fullscreenElement ? "Exit full screen" : "Full screen";
+  }
+
+  function updateAdminCameraControls() {
+    if (!isAdmin) return;
+    if (cameraToggleButton) {
+      cameraToggleButton.textContent = videoStarted ? "Turn camera off" : "Turn camera on";
+      cameraToggleButton.disabled = !isBroadcaster;
+    }
+    if (recordStartButton) {
+      recordStartButton.hidden = !isBroadcaster || !videoStarted;
+    }
+    if (recordStopButton) {
+      recordStopButton.hidden = !isBroadcaster || !videoStarted;
+    }
+    if (recordStartButton && (!mediaRecorder || mediaRecorder.state === "inactive") && !recordingSavePending) {
+      recordStartButton.disabled = !recordingEnabled || !isBroadcaster || !videoStarted;
+    }
+    if (recordStopButton && (!mediaRecorder || mediaRecorder.state === "inactive")) {
+      recordStopButton.disabled = !isBroadcaster || !videoStarted || recordingFinalizeRequested || recordingUploadInProgress || recordingSavePending;
+    }
   }
 
   async function toggleVideoFullscreen() {
@@ -247,7 +285,6 @@
       return;
     }
 
-    await startAdminMedia();
     if (!localStream) {
       appendMessage("System", "Camera stream is not available for recording.", "system");
       return;
@@ -263,7 +300,7 @@
       console.error("Recording session failed", err);
       appendMessage("System", `Recording upload session could not be opened. Storage mode: ${recordingStorageMode}.`, "system");
       setRecordState("Upload setup failed");
-      recordStartButton.disabled = false;
+      recordStartButton.disabled = !recordingEnabled || !isBroadcaster || !videoStarted;
       return;
     }
 
@@ -273,7 +310,25 @@
     recordingFinalizeRequested = false;
     recordingUploadInProgress = false;
     recordingFailed = false;
-    mediaRecorder = new MediaRecorder(localStream, mimeType ? { mimeType } : undefined);
+    try {
+      const recorderOptions = {
+        videoBitsPerSecond: recordingVideoBitsPerSecond,
+        audioBitsPerSecond: recordingAudioBitsPerSecond,
+      };
+      if (mimeType) recorderOptions.mimeType = mimeType;
+      mediaRecorder = new MediaRecorder(localStream, recorderOptions);
+    } catch (err) {
+      console.warn("Recording options failed, retrying with browser defaults", err);
+      try {
+        mediaRecorder = new MediaRecorder(localStream, mimeType ? { mimeType } : undefined);
+      } catch (fallbackErr) {
+        console.error("Recording setup failed", fallbackErr);
+        appendMessage("System", "Recording could not be started in this browser.", "system");
+        setRecordState("Recording setup failed");
+        recordStartButton.disabled = !recordingEnabled || !isBroadcaster || !videoStarted;
+        return;
+      }
+    }
     recordingStartedAt = Date.now();
 
     mediaRecorder.addEventListener("dataavailable", (event) => {
@@ -289,6 +344,7 @@
     });
 
     mediaRecorder.start(10000);
+    setRecordingIndicator(true);
     recordStartButton.disabled = true;
     recordStopButton.disabled = false;
     setRecordState("Recording");
@@ -296,6 +352,7 @@
 
   function stopRecording() {
     if (!mediaRecorder || mediaRecorder.state === "inactive") return;
+    setRecordingIndicator(false);
     recordStopButton.disabled = true;
     setRecordState("Preparing upload");
     mediaRecorder.requestData();
@@ -354,7 +411,7 @@
       } else {
         appendMessage("System", "Recording upload failed. Check Google Storage CORS and server configuration.", "system");
         setRecordState("Upload failed");
-        recordStartButton.disabled = false;
+        recordStartButton.disabled = !recordingEnabled || !isBroadcaster || !videoStarted;
       }
       recordStopButton.disabled = true;
     } finally {
@@ -444,8 +501,9 @@
 
     setRecordState("Uploaded");
     appendMessage("System", "Recording uploaded. Refreshing the room list.", "system");
+    broadcastSignal("recording-ready", { recordingId: recordingUpload.recordingId });
+    await refreshRecordingsList();
     resetRecordingState("Uploaded");
-    location.reload();
   }
 
   async function completeRecordingMetadataWithRetry() {
@@ -505,6 +563,7 @@
 
   function resetRecordingState(label) {
     mediaRecorder = null;
+    setRecordingIndicator(false);
     recordingUpload = null;
     recordingSessionUrl = "";
     recordingFilename = "";
@@ -516,8 +575,8 @@
     recordingFailed = false;
     recordingSavePending = false;
     setRetrySaveVisible(false);
-    recordStartButton.disabled = !recordingEnabled;
-    recordStopButton.disabled = true;
+    recordStartButton.disabled = !recordingEnabled || !isBroadcaster || !videoStarted;
+    recordStopButton.disabled = !isBroadcaster || !videoStarted;
     setRecordState(label);
   }
 
@@ -542,6 +601,37 @@
     }));
   }
 
+  function broadcastSignal(signalType, data) {
+    if (socket.readyState !== WebSocket.OPEN) return;
+    socket.send(JSON.stringify({
+      type: "signal",
+      signalType,
+      data,
+    }));
+  }
+
+  async function refreshRecordingsList() {
+    if (!recordingsSection) return;
+    try {
+      const response = await fetch(location.pathname, {
+        headers: { "X-Requested-With": "fetch" },
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        throw new Error(`Refresh failed with status ${response.status}`);
+      }
+      const html = await response.text();
+      const doc = new DOMParser().parseFromString(html, "text/html");
+      const freshRecordingsSection = doc.getElementById("recordings-section");
+      if (!freshRecordingsSection) {
+        throw new Error("Recordings section not found");
+      }
+      recordingsSection.innerHTML = freshRecordingsSection.innerHTML;
+    } catch (err) {
+      console.warn("Recordings refresh failed", err);
+    }
+  }
+
   function ensureViewerConnection(targetAdminId) {
     if (viewerConnection) return viewerConnection;
 
@@ -557,14 +647,15 @@
       setState("Watching live");
     };
     viewerConnection.onconnectionstatechange = () => {
-      if (viewerConnection.connectionState === "failed") {
+      const state = viewerConnection ? viewerConnection.connectionState : "closed";
+      if (state === "failed") {
         sendViewerStatus(false);
         setState("Video connection failed");
         appendMessage("System", "Video could not cross the network. Configure a TURN server for external viewers.", "system");
-      } else if (viewerConnection.connectionState === "disconnected") {
+      } else if (state === "disconnected") {
         sendViewerStatus(false);
         setState("Video disconnected");
-      } else if (viewerConnection.connectionState === "closed") {
+      } else if (state === "closed") {
         sendViewerStatus(false);
       }
     };
@@ -580,6 +671,17 @@
     pendingViewerIce.length = 0;
     remoteVideo.srcObject = null;
     sendViewerStatus(false);
+  }
+
+  function closeBroadcasterConnections(notifyViewers) {
+    for (const [viewerId, pc] of broadcasterConnections) {
+      if (notifyViewers) {
+        sendSignal(viewerId, "camera-off", {});
+      }
+      pc.close();
+    }
+    broadcasterConnections.clear();
+    pendingBroadcasterIce.clear();
   }
 
   function ensureBroadcasterConnection(viewerId) {
@@ -650,13 +752,44 @@
       }
 
       videoStarted = true;
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      localStream = await navigator.mediaDevices.getUserMedia(adminMediaConstraints);
       localVideo.srcObject = localStream;
-      setState("Live setup");
+      setState("Camera on");
+      updateAdminCameraControls();
     } catch (err) {
       videoStarted = false;
+      localStream = null;
       appendMessage("System", "Camera access was blocked or unavailable.", "system");
       setState("Media blocked");
+      updateAdminCameraControls();
+    }
+  }
+
+  function stopAdminMedia() {
+    if (!videoStarted && !localStream) return;
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      stopRecording();
+    }
+    closeBroadcasterConnections(true);
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+    localStream = null;
+    localVideo.srcObject = null;
+    videoStarted = false;
+    setState("Camera off");
+    updateAdminCameraControls();
+  }
+
+  async function toggleAdminCamera() {
+    if (!isAdmin || !isBroadcaster) return;
+    if (videoStarted) {
+      stopAdminMedia();
+      return;
+    }
+    await startAdminMedia();
+    if (localStream) {
+      await syncVideoState();
     }
   }
 
@@ -676,6 +809,7 @@
     }
     previousBroadcasterId = broadcasterId;
     setupVideoLayout();
+    updateAdminCameraControls();
 
     if (!isBroadcaster) {
       if (!broadcasterId) {
@@ -689,8 +823,9 @@
       return;
     }
 
-    await startAdminMedia();
     if (!localStream) {
+      setState("Camera off");
+      updateAdminCameraControls();
       return;
     }
 
@@ -707,6 +842,7 @@
 
     if (viewerIds.length === 0) {
       setState("Live, waiting for viewers");
+      updateAdminCameraControls();
       return;
     }
 
@@ -716,6 +852,7 @@
     }
     const watchingCount = participants.filter((participant) => participant.role !== "admin" && participant.watching).length;
     setState(`Live to ${watchingCount}/${viewerIds.length}`);
+    updateAdminCameraControls();
   }
 
   async function sendOfferToViewer(viewerId) {
@@ -742,6 +879,12 @@
   fullscreenButton.addEventListener("click", () => {
     void toggleVideoFullscreen();
   });
+
+  if (cameraToggleButton) {
+    cameraToggleButton.addEventListener("click", () => {
+      void toggleAdminCamera();
+    });
+  }
 
   if (recordStartButton && recordStopButton) {
     recordStartButton.addEventListener("click", () => {
@@ -845,6 +988,11 @@
         const answer = await pc.createAnswer();
         await pc.setLocalDescription(answer);
         sendSignal(broadcasterId, "answer", answer);
+      } else if (msg.signalType === "recording-ready") {
+        await refreshRecordingsList();
+      } else if (msg.signalType === "camera-off") {
+        closeViewerConnection();
+        setState("Waiting for stream");
       } else if (msg.signalType === "ice" && msg.data) {
         const pc = ensureViewerConnection(broadcasterId || msg.senderId);
         await addIceWhenReady(pc, msg.data, pendingViewerIce);
@@ -869,7 +1017,7 @@
     if (viewerConnection) {
       viewerConnection.close();
     }
-    broadcasterConnections.forEach((pc) => pc.close());
+    closeBroadcasterConnections(false);
     if (localStream) {
       localStream.getTracks().forEach((track) => track.stop());
     }
